@@ -1,6 +1,6 @@
 [project]
 name = "langgraph-ollama-agent"
-version = "0.2.0"
+version = "0.3.0"
 description = "Autonomous agent application using LangGraph, Python, and Ollama"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,10 +19,16 @@ dependencies = [
     "httpx>=0.28.0",
     "langgraph-checkpoint-sqlite>=3.1.1",
     "uvicorn>=0.52.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "asyncpg>=0.30.0",
+    "alembic>=1.14.0",
+    "langgraph-checkpoint-postgres>=3.0.0",
+    "psycopg[binary,pool]>=3.2.0",
 ]
 
 [dependency-groups]
 dev = [
+    "aiosqlite>=0.20.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
 ]

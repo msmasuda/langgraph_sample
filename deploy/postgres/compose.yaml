@@ -1,0 +1,30 @@
+name: langgraph-sample
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: langgraph-postgres
+    restart: unless-stopped
+    ports:
+      - "192.168.100.2:5432:5432"
+    environment:
+      POSTGRES_DB: langgraph
+      POSTGRES_USER: langgraph
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+      TZ: Asia/Tokyo
+    volumes:
+      - langgraph_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    shm_size: 256mb
+
+volumes:
+  langgraph_postgres_data:
+    name: langgraph_postgres_data
