@@ -223,6 +223,14 @@ def web_search(query: str, max_results: int = 5) -> str:
     Returns:
         Formatted search results with title, link, and snippet.
     """
+    cleaned_query = query.strip()
+    if not cleaned_query:
+        return "検索エラー: 検索語を入力してください。"
+    if len(cleaned_query) > 500:
+        return "検索エラー: 検索語が長すぎます（最大500文字）。"
+    if not 1 <= max_results <= 10:
+        return "検索エラー: 検索件数は1〜10件で指定してください。"
+
     try:
         try:
             from ddgs import DDGS
@@ -231,14 +239,16 @@ def web_search(query: str, max_results: int = 5) -> str:
 
         ddgs = DDGS()
         # Try search with Japanese region first, then fallback if empty
-        results = list(ddgs.text(query, region="jp-jp", max_results=max_results))
+        results = list(
+            ddgs.text(cleaned_query, region="jp-jp", max_results=max_results)
+        )
         if not results:
-            results = list(ddgs.text(query, max_results=max_results))
+            results = list(ddgs.text(cleaned_query, max_results=max_results))
 
         if not results:
-            return f"検索結果が見つかりませんでした: '{query}'"
+            return f"検索結果が見つかりませんでした: '{cleaned_query}'"
 
-        formatted_results = [f"【Web検索結果: '{query}'】\n"]
+        formatted_results = [f"【Web検索結果: '{cleaned_query}'】\n"]
         for idx, item in enumerate(results, 1):
             title = item.get("title", "No Title")
             href = item.get("href", "")
@@ -248,8 +258,8 @@ def web_search(query: str, max_results: int = 5) -> str:
             )
 
         return "\n".join(formatted_results)
-    except Exception as e:
-        return f"Web検索中にエラーが発生しました: {str(e)}"
+    except Exception:
+        return "Web検索中にエラーが発生しました。時間をおいて再試行してください。"
 
 
 def _get_thread_id(config: RunnableConfig) -> str:

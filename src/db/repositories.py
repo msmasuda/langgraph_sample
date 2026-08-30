@@ -17,11 +17,17 @@ from src.db.models import (
     ConversationExecution,
     IdempotencyRecord,
     Note,
+    RateLimitBucket,
     ToolExecution,
     UsageRecord,
     User,
 )
 from src.services.conversation_service import ConversationRecord, NoteRecord
+from src.services.rate_limit import (
+    RateLimitResult,
+    build_rate_limit_result,
+    hash_identifier,
+)
 
 
 def _conversation_record(row: Conversation) -> ConversationRecord:
@@ -47,6 +53,75 @@ def _note_record(row: Note) -> NoteRecord:
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
+
+
+class DatabaseRateLimiter:
+    """Share fixed-window counters across all PostgreSQL API processes."""
+
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self.sessions = sessions
+        self._last_cleanup = 0.0
+        self._cleanup_lock = asyncio.Lock()
+
+    async def hit(
+        self,
+        scope: str,
+        subject: str,
+        *,
+        limit: int,
+        window_seconds: int,
+    ) -> RateLimitResult:
+        now = datetime.now(UTC)
+        epoch = int(now.timestamp())
+        bucket_epoch = epoch - (epoch % window_seconds)
+        bucket_start = datetime.fromtimestamp(bucket_epoch, UTC)
+        expires_at = bucket_start + timedelta(seconds=window_seconds * 2)
+        statement = (
+            postgres_insert(RateLimitBucket)
+            .values(
+                scope=scope,
+                subject_hash=hash_identifier(subject),
+                window_started_at=bucket_start,
+                request_count=1,
+                expires_at=expires_at,
+            )
+            .on_conflict_do_update(
+                index_elements=[
+                    RateLimitBucket.scope,
+                    RateLimitBucket.subject_hash,
+                    RateLimitBucket.window_started_at,
+                ],
+                set_={
+                    "request_count": RateLimitBucket.request_count + 1,
+                    "expires_at": expires_at,
+                },
+            )
+            .returning(RateLimitBucket.request_count)
+        )
+        async with self.sessions() as session:
+            count = await session.scalar(statement)
+            await session.commit()
+        await self._cleanup_if_due(now, window_seconds)
+        return build_rate_limit_result(
+            int(count or 1),
+            limit,
+            window_seconds - (epoch - bucket_epoch),
+            window_seconds,
+        )
+
+    async def _cleanup_if_due(self, now: datetime, window_seconds: int) -> None:
+        monotonic_now = asyncio.get_running_loop().time()
+        if monotonic_now - self._last_cleanup < window_seconds:
+            return
+        async with self._cleanup_lock:
+            if monotonic_now - self._last_cleanup < window_seconds:
+                return
+            async with self.sessions() as session:
+                await session.execute(
+                    delete(RateLimitBucket).where(RateLimitBucket.expires_at < now)
+                )
+                await session.commit()
+            self._last_cleanup = monotonic_now
 
 
 class DatabaseConversationStore:

@@ -142,16 +142,21 @@ def make_test_app(
     conversation_store=None,
     note_store=None,
     execution_registry=None,
+    settings_overrides=None,
 ):
+    setting_values = {
+        "auth_mode": "disabled",
+        "rate_limit_enabled": False,
+        "api_json_logging": False,
+        "api_max_message_chars": 20_000,
+        "idempotency_ttl_seconds": 60,
+        "idempotency_max_entries": 20,
+        "database_url": None,
+        "checkpoint_database_url": None,
+    }
+    setting_values.update(settings_overrides or {})
     return create_app(
-        settings=Settings(
-            auth_mode="disabled",
-            api_max_message_chars=20_000,
-            idempotency_ttl_seconds=60,
-            idempotency_max_entries=20,
-            database_url=None,
-            checkpoint_database_url=None,
-        ),
+        settings=Settings(**setting_values),
         agent_service=agent_service or StubAgentService(),
         model_service=StubModelService(model_available),
         conversation_store=conversation_store,

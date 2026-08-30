@@ -5,6 +5,7 @@ from src.db.repositories import (
     DatabaseConversationStore,
     DatabaseIdempotencyStore,
     DatabaseNoteStore,
+    DatabaseRateLimiter,
     DatabaseRunStore,
     PostgresConversationExecutionRegistry,
 )
@@ -15,6 +16,7 @@ __all__ = [
     "DatabaseIdempotencyStore",
     "DatabaseManager",
     "DatabaseNoteStore",
+    "DatabaseRateLimiter",
     "DatabaseRunStore",
     "PostgresCheckpointManager",
     "PostgresConversationExecutionRegistry",

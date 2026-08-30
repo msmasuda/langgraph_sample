@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, Query, Request, Response, Security, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -17,6 +18,12 @@ from src.api.auth import (
     AuthenticationError,
     AuthenticationUnavailable,
     OpenIDConnectAuthenticator,
+)
+from src.api.protection import (
+    client_ip,
+    configure_api_logger,
+    hash_identifier,
+    rate_limit_headers,
 )
 from src.api.runtime import build_lifespan
 from src.api.schemas import (
@@ -59,6 +66,8 @@ from src.services import (
     InMemoryNoteStore,
     OllamaModelService,
 )
+from src.services.rate_limit import InMemoryRateLimiter
+from src.tool_policy import ToolApprovalPolicy
 
 _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
 IdempotencyKey = Annotated[
@@ -239,10 +248,37 @@ def create_app(
     )
     app = FastAPI(
         title="LangGraph Ollama Agent API",
-        version="0.4.0",
+        version="0.5.0",
         description="Web・モバイル向けLangGraphエージェントAPI",
         lifespan=build_lifespan(active_settings, enabled=managed_database),
     )
+    allowed_origins = active_settings.allowed_cors_origins
+    if "*" in allowed_origins:
+        raise ValueError("CORS_ALLOWED_ORIGINSには具体的なOriginを設定してください")
+    if allowed_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(allowed_origins),
+            allow_credentials=active_settings.cors_allow_credentials,
+            allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=[
+                "Authorization",
+                "Content-Type",
+                "Idempotency-Key",
+                "X-Request-ID",
+            ],
+            expose_headers=[
+                "X-Request-ID",
+                "Idempotency-Replayed",
+                "RateLimit",
+                "RateLimit-Policy",
+                "RateLimit-Limit",
+                "RateLimit-Remaining",
+                "RateLimit-Reset",
+                "Retry-After",
+            ],
+            max_age=active_settings.cors_max_age_seconds,
+        )
     app.state.settings = active_settings
     app.state.agent_service = agent_service or (
         None if managed_database else AgentService.create(settings=active_settings)
@@ -261,6 +297,14 @@ def create_app(
     app.state.run_store = run_store
     app.state.database_manager = None
     app.state.checkpoint_manager = None
+    app.state.rate_limiter = InMemoryRateLimiter()
+    app.state.tool_approval_policy = ToolApprovalPolicy(
+        active_settings.tools_requiring_approval
+    )
+    api_logger = configure_api_logger(
+        active_settings.api_log_level,
+        enabled=active_settings.api_json_logging,
+    )
     app.state.authenticator = authenticator or OpenIDConnectAuthenticator(
         active_settings
     )
@@ -268,12 +312,54 @@ def create_app(
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next: Any) -> Response:
+        started_at = time.perf_counter()
         incoming = request.headers.get("X-Request-ID", "")
         request.state.request_id = (
             incoming if _REQUEST_ID_PATTERN.fullmatch(incoming) else str(uuid.uuid4())
         )
-        response = await call_next(request)
+        address = client_ip(request, active_settings.trusted_proxies)
+        request.state.client_ip = address
+        rate_result = None
+        if (
+            active_settings.rate_limit_enabled
+            and request.method != "OPTIONS"
+            and request.url.path.startswith("/v1/")
+        ):
+            rate_result = await app.state.rate_limiter.hit(
+                "ip",
+                address,
+                limit=active_settings.rate_limit_ip_requests,
+                window_seconds=active_settings.rate_limit_window_seconds,
+            )
+            request.state.rate_limit_result = rate_result
+            if not rate_result.allowed:
+                response = _error_response(
+                    request,
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    code="rate_limit_exceeded",
+                    message="リクエストが多すぎます。時間をおいて再試行してください。",
+                    headers=rate_limit_headers(rate_result, rejected=True),
+                )
+            else:
+                response = await call_next(request)
+        else:
+            response = await call_next(request)
         response.headers["X-Request-ID"] = request.state.request_id
+        strictest = getattr(request.state, "rate_limit_result", rate_result)
+        if strictest is not None and strictest.allowed:
+            response.headers.update(rate_limit_headers(strictest))
+        context: dict[str, Any] = {
+            "request_id": request.state.request_id,
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "duration_ms": int((time.perf_counter() - started_at) * 1_000),
+            "client_hash": hash_identifier(address)[:16],
+        }
+        user_id = getattr(request.state, "user_id", None)
+        if user_id is not None:
+            context["user_hash"] = hash_identifier(str(user_id))[:16]
+        api_logger.info("request.completed", extra={"context": context})
         return response
 
     @app.exception_handler(ApiProblem)
@@ -303,6 +389,16 @@ def create_app(
         request: Request,
         _error: Exception,
     ) -> JSONResponse:
+        api_logger.error(
+            "request.failed",
+            exc_info=(type(_error), _error, _error.__traceback__),
+            extra={
+                "context": {
+                    "request_id": _request_id(request),
+                    "path": request.url.path,
+                }
+            },
+        )
         return _error_response(
             request,
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -311,6 +407,7 @@ def create_app(
         )
 
     async def resolve_current_user(
+        request: Request,
         credentials: Annotated[
             HTTPAuthorizationCredentials | None,
             Security(bearer_scheme),
@@ -321,35 +418,53 @@ def create_app(
                 active_settings.default_user_id,
                 active_settings.default_user_subject,
             )
-            return active_settings.default_user_id
-        if credentials is None or credentials.scheme.lower() != "bearer":
-            raise ApiProblem(
-                status.HTTP_401_UNAUTHORIZED,
-                "authentication_required",
-                "Bearerアクセストークンが必要です。",
-                headers={"WWW-Authenticate": "Bearer"},
+            user_id = active_settings.default_user_id
+        else:
+            if credentials is None or credentials.scheme.lower() != "bearer":
+                raise ApiProblem(
+                    status.HTTP_401_UNAUTHORIZED,
+                    "authentication_required",
+                    "Bearerアクセストークンが必要です。",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            try:
+                principal = await app.state.authenticator.authenticate(
+                    credentials.credentials
+                )
+            except AuthenticationUnavailable as error:
+                raise ApiProblem(
+                    status.HTTP_503_SERVICE_UNAVAILABLE,
+                    "authentication_unavailable",
+                    "認証サーバーを利用できません。",
+                ) from error
+            except AuthenticationError as error:
+                raise ApiProblem(
+                    status.HTTP_401_UNAUTHORIZED,
+                    "invalid_access_token",
+                    "アクセストークンが無効です。",
+                    headers={"WWW-Authenticate": "Bearer error=\"invalid_token\""},
+                ) from error
+            user_id = await app.state.conversation_store.get_or_create_user(
+                principal.subject,
+                display_name=principal.display_name,
             )
-        try:
-            principal = await app.state.authenticator.authenticate(
-                credentials.credentials
+        request.state.user_id = user_id
+        if active_settings.rate_limit_enabled:
+            result = await app.state.rate_limiter.hit(
+                "user",
+                str(user_id),
+                limit=active_settings.rate_limit_user_requests,
+                window_seconds=active_settings.rate_limit_window_seconds,
             )
-        except AuthenticationUnavailable as error:
-            raise ApiProblem(
-                status.HTTP_503_SERVICE_UNAVAILABLE,
-                "authentication_unavailable",
-                "認証サーバーを利用できません。",
-            ) from error
-        except AuthenticationError as error:
-            raise ApiProblem(
-                status.HTTP_401_UNAUTHORIZED,
-                "invalid_access_token",
-                "アクセストークンが無効です。",
-                headers={"WWW-Authenticate": "Bearer error=\"invalid_token\""},
-            ) from error
-        return await app.state.conversation_store.get_or_create_user(
-            principal.subject,
-            display_name=principal.display_name,
-        )
+            request.state.rate_limit_result = result
+            if not result.allowed:
+                raise ApiProblem(
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                    "rate_limit_exceeded",
+                    "リクエストが多すぎます。時間をおいて再試行してください。",
+                    headers=rate_limit_headers(result, rejected=True),
+                )
+        return user_id
 
     CurrentUserId = Annotated[uuid.UUID, Depends(resolve_current_user)]
 

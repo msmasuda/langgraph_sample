@@ -25,6 +25,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 
 from src.config import Settings, get_settings
 from src.state import AgentState
+from src.tool_policy import ToolApprovalPolicy
 from src.tools import ALL_TOOLS
 
 # Persistent checkpoint storage
@@ -133,6 +134,9 @@ def create_agent(
     active_temp = temperature if temperature is not None else active_settings.temperature
     active_sys_prompt = active_settings.system_prompt if system_prompt is None else system_prompt
     active_tools = tools if tools is not None else ALL_TOOLS
+    ToolApprovalPolicy(active_settings.tools_requiring_approval).validate_registration(
+        [tool.name for tool in active_tools]
+    )
 
     # Initialize Ollama LLM
     llm = chat_model or ChatOllama(

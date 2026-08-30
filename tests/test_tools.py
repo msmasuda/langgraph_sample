@@ -1,6 +1,8 @@
 """Unit tests for agent tools."""
 
+import sys
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 from langchain_core.runnables import RunnableConfig
 
@@ -10,7 +12,7 @@ from src.tools import (
     save_note,
     read_notes,
     ALL_TOOLS,
-
+    web_search,
 )
 
 
@@ -78,6 +80,30 @@ def test_calculator_blocks_attribute_access_and_large_exponents():
 
     assert "計算エラー" in attribute_result
     assert "計算エラー" in exponent_result
+
+
+def test_web_search_rejects_oversized_inputs_without_external_access():
+    """Validate search bounds before invoking the external search provider."""
+    long_query = web_search.invoke({"query": "a" * 501, "max_results": 5})
+    too_many = web_search.invoke({"query": "test", "max_results": 11})
+
+    assert "最大500文字" in long_query
+    assert "1〜10件" in too_many
+
+
+def test_web_search_does_not_expose_provider_error(monkeypatch):
+    """Keep provider internals and URLs out of tool responses."""
+
+    class FailingSearch:
+        def text(self, *_args, **_kwargs):
+            raise RuntimeError("internal http://search.internal.local?token=secret")
+
+    monkeypatch.setitem(sys.modules, "ddgs", SimpleNamespace(DDGS=FailingSearch))
+
+    result = web_search.invoke({"query": "test", "max_results": 5})
+
+    assert result == "Web検索中にエラーが発生しました。時間をおいて再試行してください。"
+    assert "internal.local" not in result
 
 
 def test_concurrent_note_saves_are_not_lost(tmp_path, monkeypatch):

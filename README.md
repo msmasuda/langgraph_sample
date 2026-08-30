@@ -22,6 +22,8 @@ Web検索、計算機、システム日時取得、メモ管理などのツー�
   - 会話一覧・更新・削除・履歴・キャンセル、メモCRUD、リクエストID、安全なエラー応答を提供。
   - Keycloak/OIDCのRS256アクセストークンを検証し、JWTの`sub`ごとに会話・メモを分離。
   - WEB・モバイルはAuthorization Code + PKCEでログイン可能。`/health`・`/ready`以外のAPIをBearer認証で保護。
+  - 許可Origin限定CORS、IP・ユーザー単位の共有レート制限、機密情報を記録しないJSONアクセスログに対応。
+  - 外部副作用ツールは承認実行基盤へ接続されるまで登録を拒否する、フェイルクローズのツールポリシーを提供。
 - **Ollama状態確認**:
   - Ollamaへの接続状態とインストール済みモデルを取得し、Web UIへ表示。
 - **充実のツールセット**:
@@ -53,6 +55,7 @@ langgraph_sample/
 ├── src/
 │   ├── __init__.py
 │   ├── config.py               # 設定管理 (Pydantic Settings)
+│   ├── tool_policy.py          # 副作用ツールの承認・登録ポリシー
 │   ├── errors.py               # 利用者向けの安全なエラー分類
 │   ├── state.py                # LangGraph 状態定義 (AgentState)
 │   ├── tools.py                # エージェント用ツール群 (Web検索, 計算, 日時, SQLiteメモ)
@@ -60,6 +63,7 @@ langgraph_sample/
 │   ├── api/
 │   │   ├── app.py              # FastAPIアプリ、APIエンドポイント
 │   │   ├── auth.py             # OIDC Discovery・JWKS・JWT検証
+│   │   ├── protection.py       # CORS補助・レート制限ヘッダー・安全なJSONログ
 │   │   ├── runtime.py          # PostgreSQL・チェックポインタのライフサイクル
 │   │   ├── schemas.py          # API入出力スキーマ
 │   │   └── sse.py              # SSEイベントエンコード
@@ -74,6 +78,7 @@ langgraph_sample/
 │   │   ├── conversation_service.py # 会話メタデータ、同時実行・冪等性管理
 │   │   ├── note_tools.py       # PostgreSQL対応メモツール
 │   │   ├── retention_service.py # 保存期限クリーンアップ
+│   │   ├── rate_limit.py       # 固定窓レート制限の共通型・ローカル実装
 │   │   └── model_service.py    # Ollama接続確認・モデル一覧取得
 │   ├── cli.py                  # 対話型Rich CLIアプリケーション
 │   └── web_app.py              # Streamlit Webチャットアプリケーション
@@ -83,6 +88,7 @@ langgraph_sample/
 │   ├── test_agent.py           # 同期・非同期グラフ構築・動作テスト
 │   ├── test_api.py             # HTTP API、SSE、冪等性・同時実行テスト
 │   ├── test_auth.py            # JWT検証・認証必須・ユーザー分離テスト
+│   ├── test_protection.py      # CORS・レート制限・ログ・承認ポリシーテスト
 │   ├── test_persistence.py     # DBリポジトリ・メモ・保存期限テスト
 │   └── test_services.py        # 共通サービス、実行上限、Ollama状態テスト
 └── data/                       # 会話履歴・メモのSQLite保存先 (自動生成、Git対象外)
@@ -141,6 +147,14 @@ IDEMPOTENCY_MAX_ENTRIES=1000
 AUTH_MODE=oidc
 OIDC_ISSUER_URL=http://192.168.100.2:8080/realms/langgraph
 OIDC_AUDIENCE=langgraph-api
+CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173
+RATE_LIMIT_ENABLED=true
+RATE_LIMIT_WINDOW_SECONDS=60
+RATE_LIMIT_IP_REQUESTS=120
+RATE_LIMIT_USER_REQUESTS=60
+API_JSON_LOGGING=true
+API_LOG_LEVEL=INFO
+APPROVAL_REQUIRED_TOOLS=send_email,create_calendar_event,delete_file,execute_payment
 DATABASE_URL=postgresql+asyncpg://langgraph:パスワード@192.168.100.2:5432/langgraph
 CHECKPOINT_DATABASE_URL=postgresql://langgraph:パスワード@192.168.100.2:5432/langgraph
 DATABASE_POOL_SIZE=5
@@ -190,7 +204,7 @@ uv run streamlit run src/web_app.py
 
 ### 3. Web・モバイル向けAPIを起動する
 
-PostgreSQLとKeycloakを用意し、`.env`へデータベース設定とOIDC設定を追加してから、アプリ所有テーブルを作成します。LangGraph所有テーブルはAPI初回起動時に安全に初期化されます。Dockge向けKeycloak設定は[`deploy/keycloak/README.md`](deploy/keycloak/README.md)を参照してください。
+PostgreSQLとKeycloakを用意し、`.env`へデータベース、OIDC、CORS、レート制限設定を追加してから、アプリ所有テーブルを作成します。LangGraph所有テーブルはAPI初回起動時に安全に初期化されます。Dockge向けKeycloak設定は[`deploy/keycloak/README.md`](deploy/keycloak/README.md)を参照してください。
 
 ```bash
 uv run alembic upgrade head
@@ -239,7 +253,10 @@ SSEでは `message.started`、`assistant.delta`、`tool.started`、
 > PostgreSQL設定時は、会話、メモ、LangGraph履歴、実行履歴、冪等性がAPI再起動後も保持されます。
 > 同一会話の実行リースもPostgreSQLで共有されるため、複数APIプロセスから安全に利用できます。
 > OIDC有効時はJWTの`sub`を内部ユーザーへ対応付け、全会話・メモ操作で所有者を確認します。他ユーザーの会話IDを指定しても`404`を返します。
-> 現在のKeycloak ComposeはLAN内検証用です。インターネットへ公開する前にHTTPS、CORS、レート制限、ログマスキングを追加してください。
+> CORSは`CORS_ALLOWED_ORIGINS`に列挙したOriginだけを許可します。`*`は起動時に拒否されます。
+> レート制限はPostgreSQL利用時に全APIプロセスで共有され、`429`、`RateLimit`、`RateLimit-Policy`、`Retry-After`で再試行時期を通知します。移行期間の互換性のため`RateLimit-Limit`、`RateLimit-Remaining`、`RateLimit-Reset`も返します。
+> APIログにはリクエスト本文、Authorization、Cookie、ツール引数を記録せず、IPとユーザーIDはハッシュ化します。
+> 現在のKeycloak ComposeはLAN内検証用です。インターネットへ公開する前にHTTPSとリバースプロキシを構成してください。
 
 ### SQLiteデータの移行
 
@@ -266,4 +283,4 @@ uv run python -m src.db.cleanup --limit 100
 uv run pytest
 ```
 
-現在は43件の自動テストを実行します。
+現在は53件の自動テストを実行します。
