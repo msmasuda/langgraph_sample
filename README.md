@@ -1,0 +1,134 @@
+# 🤖 LangGraph + Python + Ollama 自律型エージェント
+
+LangGraph、Python、ローカルLLM（Ollama）を組み合わせた自律型ReActエージェントアプリケーションです。
+Web検索、計算機、システム日時取得、メモ管理などのツールを自律的に判断して使い分け、マルチターンでの会話履歴を保持します。
+
+---
+
+## 🌟 特徴
+
+- **自律型 ReAct ループ (LangGraph)**:
+  - モデルの判断によりツールを自動的に選択・実行し、その結果をもとに追加思考・回答生成を行います。
+- **ローカルLLM連携 (Ollama)**:
+  - `ChatOllama` / `langchain-ollama` を使用し、ローカル環境で動く軽量・高性能モデル（`qwen3.5:9b-mlx`, `qwen3.8:27b-mlx`, `gemma4:12b-mlx` など）と連携。
+- **マルチターン対話メモリ**:
+  - LangGraphの `SqliteSaver` チェックポインタにより、スレッド単位で過去の会話コンテキストを永続化。
+- **充実のツールセット**:
+  - 🌐 **Web検索 (`web_search`)**: DuckDuckGoを利用したリアルタイム最新情報取得
+  - 🔢 **計算機 (`calculator`)**: 安全な数式評価・数学関数実行
+  - ⏰ **日時取得 (`get_current_datetime`)**: 現在の日時・曜日・タイムゾーン（JST/UTC）情報取得
+  - 📝 **メモ管理 (`save_note`, `read_notes`)**: スレッド単位のSQLiteメモ保存と読み出し
+- **2種類のインターフェース**:
+  - 💻 **リッチCLI (`src/cli.py`)**: Richライブラリによるスタイリッシュな対話、ツール呼び出しプロセスの可視化
+  - 🌐 **Web UI (`src/web_app.py`)**: Streamlitによるブラウザ対話画面、モデル切り替え、ツール実行ログ詳細表示
+
+---
+
+## 📁 プロジェクト構成
+
+```
+langgraph_sample/
+├── pyproject.toml              # プロジェクト設定・依存関係 (uv)
+├── .python-version             # Python 3.12 指定
+├── .env.example                # 環境変数サンプル
+├── .env                        # 設定ファイル (Ollama設定等)
+├── README.md                   # 本ドキュメント
+├── src/
+│   ├── __init__.py
+│   ├── config.py               # 設定管理 (Pydantic Settings)
+│   ├── state.py                # LangGraph 状態定義 (AgentState)
+│   ├── tools.py                # エージェント用ツール群 (Web検索, 計算, 日時, SQLiteメモ)
+│   ├── agent.py                # LangGraph ReActエージェント定義 & コンパイル
+│   ├── cli.py                  # 対話型Rich CLIアプリケーション
+│   └── web_app.py              # Streamlit Webチャットアプリケーション
+├── tests/
+│   ├── __init__.py
+│   ├── test_tools.py           # ツール群の単体テスト
+│   └── test_agent.py           # グラフ構築・動作テスト
+└── data/                       # 会話履歴・メモのSQLite保存先 (自動生成、Git対象外)
+```
+
+---
+
+## 🚀 クイックスタート
+
+### 1. 前提条件
+
+- Python 3.11 以上 (推奨: Python 3.12)
+- [uv](https://docs.astral.sh/uv/) がインストールされていること
+- [Ollama](https://ollama.com/) がインストール・起動されていること
+
+```bash
+# Ollamaモデルの準備 (例)
+ollama pull qwen3.5:9b-mlx
+# または
+ollama pull qwen2.5:7b
+```
+
+### 2. インストール
+
+```bash
+# 依存関係の同期
+uv sync
+```
+
+### 3. 環境設定
+
+`.env.example` をコピーして `.env` を作成します（必要に応じてモデル名やURLを変更）。
+
+```bash
+cp .env.example .env
+```
+
+`.env` 設定項目：
+```ini
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=qwen3.5:9b-mlx
+TEMPERATURE=0.2
+THREAD_ID=default-session
+MAX_CONTEXT_TOKENS=12000
+```
+
+---
+
+## 🖥️ 実行方法
+
+### 1. リッチCLIで対話する
+
+ターミナル上で対話型エージェントを起動します。
+
+```bash
+uv run python -m src.cli
+```
+
+**CLIコマンド**:
+- `/reset` or `/clear`: 会話セッション（Thread ID）をリセット
+- `/session <ID>`: 指定したセッションへ切り替え
+- `/history`: 現在のセッションの会話履歴を表示
+- `/notes`: 保存されているメモを一覧表示
+- `/model <モデル名>`: 使用するOllamaモデルを切り替え
+- `/help`: ヘルプを表示
+- `/exit` or `/quit`: 終了
+
+---
+
+### 2. Streamlit Web UIで対話する
+
+ブラウザ上で操作できるWebチャットインターフェースを起動します。
+
+```bash
+uv run streamlit run src/web_app.py
+```
+
+ブラウザで `http://localhost:8501` にアクセスします。
+- サイドバーからモデル選択、Temperatureの調整、スレッドのリセット、現在のスレッド専用メモの確認が可能です。
+- アシスタントの回答時に「ツール実行ログ」がアコーディオン形式で詳細表示されます。
+- Web UIのスレッドIDは推測困難なUUIDとしてURLに保持されます。URLを共有すると会話へアクセスできるため、外部公開時は別途認証を追加してください。
+
+---
+
+## 🧪 テスト実行
+
+```bash
+uv run pytest
+```
