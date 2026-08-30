@@ -30,9 +30,14 @@ OIDC_AUDIENCE=langgraph-api
 |---|---|---|---|
 | WEB | `langgraph-web` | Authorization Code + PKCE (S256) | 開発用localhostの3000・5173番を登録済み |
 | モバイル | `langgraph-mobile` | Authorization Code + PKCE (S256) | `langgraph://oauth/callback` |
+| Streamlit | `langgraph-streamlit` | Authorization Code（サーバー側機密クライアント） | `http://localhost:8501/oauth2callback` |
 | API | `langgraph-api` | Resource Server | ログインフローなし |
 
-WEB・モバイルのアクセストークンには`langgraph-api` audienceが追加されます。APIはRS256署名、`iss`、`aud`、`exp`、`iat`、`sub`を検証します。クライアントシークレットはWEB・モバイルアプリへ埋め込みません。
+WEB・モバイル・Streamlitのアクセストークンには`langgraph-api` audienceが追加されます。APIはRS256署名、`iss`、`aud`、`exp`、`iat`、`sub`を検証します。クライアントシークレットはWEB・モバイルアプリへ埋め込みません。
+
+Streamlitはブラウザ内で動くSPAではなくPythonサーバーなので、専用の機密クライアントを使用します。既存RealmではClientsから`langgraph-streamlit`を追加し、Credentialsタブのシークレットをプロジェクトの`.streamlit/secrets.toml`だけへ保存してください。シークレットはGitへコミットしません。
+
+既存RealmへAudience Mapperを手動追加する場合は、Clients → `langgraph-streamlit` → Client scopes → `langgraph-streamlit-dedicated`でMapper Typeを`Audience`にし、Included Client Audienceを`langgraph-api`、Add to access tokenをOnにします。Included Custom Audienceは空欄、Add to ID tokenはOffにします。設定変更後は、古いトークンを破棄するためStreamlitから一度ログアウトして再ログインしてください。ログイン後に`401 invalid_access_token`となる場合は、まずこのAudience設定を確認します。
 
 ## 本番利用前の注意
 

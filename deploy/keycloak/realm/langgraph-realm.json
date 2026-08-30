@@ -84,6 +84,35 @@
           }
         }
       ]
+    },
+    {
+      "clientId": "langgraph-streamlit",
+      "name": "LangGraph Streamlit Client",
+      "protocol": "openid-connect",
+      "clientAuthenticatorType": "client-secret",
+      "publicClient": false,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:8501/oauth2callback",
+        "http://127.0.0.1:8501/oauth2callback"
+      ],
+      "webOrigins": [],
+      "protocolMappers": [
+        {
+          "name": "langgraph-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "langgraph-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
     }
   ]
 }

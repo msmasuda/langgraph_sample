@@ -248,7 +248,7 @@ def create_app(
     )
     app = FastAPI(
         title="LangGraph Ollama Agent API",
-        version="0.5.0",
+        version="0.6.0",
         description="Web・モバイル向けLangGraphエージェントAPI",
         lifespan=build_lifespan(active_settings, enabled=managed_database),
     )

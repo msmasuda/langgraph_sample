@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8000, ge=1, le=65_535)
     api_max_message_chars: int = Field(default=20_000, ge=1, le=20_000)
+    web_api_base_url: str = "http://127.0.0.1:8000"
+    web_api_timeout_seconds: float = Field(default=180.0, gt=0.0, le=1_800.0)
     idempotency_ttl_seconds: float = Field(default=3_600.0, gt=0.0, le=86_400.0)
     idempotency_max_entries: int = Field(default=1_000, ge=1, le=100_000)
 

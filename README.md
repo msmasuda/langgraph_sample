@@ -12,9 +12,9 @@ Web検索、計算機、システム日時取得、メモ管理などのツー�
 - **ローカルLLM連携 (Ollama)**:
   - `ChatOllama` / `langchain-ollama` を使用し、ローカル環境で動く軽量・高性能モデル（`qwen3.5:9b-mlx`, `qwen3.8:27b-mlx`, `gemma4:12b-mlx` など）と連携。
 - **マルチターン対話メモリ**:
-  - CLI・Streamlitは`SqliteSaver`、APIは`AsyncPostgresSaver`により、スレッド単位で過去の会話コンテキストを永続化。
+  - CLIは`SqliteSaver`、APIとStreamlit Web UIは`AsyncPostgresSaver`により、スレッド単位で過去の会話コンテキストを永続化。
 - **共通エージェントサービス**:
-  - CLI、Streamlit、FastAPIから共通利用できる `AgentService` を提供。
+  - CLIとFastAPIから共通利用できる `AgentService` を提供し、StreamlitはFastAPI経由で利用。
   - 非同期実行、全体タイムアウト、ツール呼び出し上限、安全なエラー変換に対応。
 - **Web・モバイル向けAPI**:
   - FastAPIによる会話作成、通常応答、Server-Sent Events（SSE）ストリーミングを提供。
@@ -30,10 +30,10 @@ Web検索、計算機、システム日時取得、メモ管理などのツー�
   - 🌐 **Web検索 (`web_search`)**: DuckDuckGoを利用したリアルタイム最新情報取得
   - 🔢 **計算機 (`calculator`)**: 安全な数式評価・数学関数実行
   - ⏰ **日時取得 (`get_current_datetime`)**: 現在の日時・曜日・タイムゾーン（JST/UTC）情報取得
-  - 📝 **メモ管理 (`save_note`, `read_notes`)**: CLI・StreamlitではSQLite、PostgreSQL APIでは会話単位の共有メモを保存・読み出し
+  - 📝 **メモ管理 (`save_note`, `read_notes`)**: CLIではSQLite、API・StreamlitではPostgreSQLへ会話単位の共有メモを保存・読み出し
 - **3種類のインターフェース**:
   - 💻 **リッチCLI (`src/cli.py`)**: Richライブラリによるスタイリッシュな対話、ツール呼び出しプロセスの可視化
-  - 🌐 **Web UI (`src/web_app.py`)**: Streamlitによるブラウザ対話画面、モデル切り替え、ツール実行ログ詳細表示
+  - 🌐 **Web UI (`src/web_app.py`)**: StreamlitによるKeycloakログイン、会話管理、SSE回答表示、安全なツール実行状態表示
   - 🔌 **HTTP API (`src/api/app.py`)**: Web・モバイルアプリ向けJSON APIとSSEストリーミング
 
 ---
@@ -46,6 +46,8 @@ langgraph_sample/
 ├── .python-version             # Python 3.12 指定
 ├── .env.example                # 環境変数サンプル
 ├── .env                        # 設定ファイル (Ollama設定等)
+├── .streamlit/
+│   └── secrets.toml.example    # Streamlit OIDC設定例（実シークレットはGit対象外）
 ├── alembic.ini                 # DBマイグレーション設定
 ├── migrations/                # アプリ用PostgreSQLマイグレーション
 ├── deploy/
@@ -81,6 +83,7 @@ langgraph_sample/
 │   │   ├── rate_limit.py       # 固定窓レート制限の共通型・ローカル実装
 │   │   └── model_service.py    # Ollama接続確認・モデル一覧取得
 │   ├── cli.py                  # 対話型Rich CLIアプリケーション
+│   ├── web_api_client.py       # Streamlit用FastAPI・SSEクライアント
 │   └── web_app.py              # Streamlit Webチャットアプリケーション
 ├── tests/
 │   ├── __init__.py
@@ -90,6 +93,8 @@ langgraph_sample/
 │   ├── test_auth.py            # JWT検証・認証必須・ユーザー分離テスト
 │   ├── test_protection.py      # CORS・レート制限・ログ・承認ポリシーテスト
 │   ├── test_persistence.py     # DBリポジトリ・メモ・保存期限テスト
+│   ├── test_web_api_client.py  # Streamlit用APIクライアントテスト
+│   ├── test_web_app.py         # Streamlit画面スモークテスト
 │   └── test_services.py        # 共通サービス、実行上限、Ollama状態テスト
 └── data/                       # 会話履歴・メモのSQLite保存先 (自動生成、Git対象外)
 ```
@@ -142,6 +147,8 @@ OLLAMA_HEALTH_TIMEOUT_SECONDS=3
 API_HOST=127.0.0.1
 API_PORT=8000
 API_MAX_MESSAGE_CHARS=20000
+WEB_API_BASE_URL=http://127.0.0.1:8000
+WEB_API_TIMEOUT_SECONDS=180
 IDEMPOTENCY_TTL_SECONDS=3600
 IDEMPOTENCY_MAX_ENTRIES=1000
 AUTH_MODE=oidc
@@ -189,16 +196,27 @@ uv run python -m src.cli
 
 ### 2. Streamlit Web UIで対話する
 
-ブラウザ上で操作できるWebチャットインターフェースを起動します。
+先にFastAPIを起動し、ブラウザ上で操作できるWebチャットインターフェースを起動します。StreamlitはLangGraphやデータベースへ直接接続せず、すべての操作を`WEB_API_BASE_URL`のAPIへ送信します。
+
+`AUTH_MODE=oidc`の場合は、Keycloakに機密クライアント`langgraph-streamlit`を作成し、OIDC設定例をコピーして実際のシークレットを設定します。
+
+```bash
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+```
+
+`.streamlit/secrets.toml`はGit対象外です。Keycloak側には`http://localhost:8501/oauth2callback`を有効なリダイレクトURIとして登録します。詳しい手順は[`deploy/keycloak/README.md`](deploy/keycloak/README.md)を参照してください。
 
 ```bash
 uv run streamlit run src/web_app.py
 ```
 
 ブラウザで `http://localhost:8501` にアクセスします。
-- サイドバーからOllama接続状態とインストール済みモデルの確認、モデル選択、Temperatureの調整、スレッドのリセット、現在のスレッド専用メモの確認が可能です。
-- アシスタントの回答時に「ツール実行ログ」がアコーディオン形式で詳細表示されます。
-- Web UIのスレッドIDは推測困難なUUIDとしてURLに保持されます。URLを共有すると会話へアクセスできるため、外部公開時は別途認証を追加してください。
+- Keycloakログイン状態とAPI・Ollama・PostgreSQLの稼働状態を確認できます。
+- 会話の新規作成、一覧選択、名前変更、アーカイブ・再開、削除に対応します。
+- SSEで回答を逐次表示し、送信ボタンが停止ボタンへ切り替わります。停止時はAPIにもキャンセルを通知します。
+- 会話IDはURLに保持され、ブラウザ再読み込み後もAPIから履歴を復元します。
+- ツール実行は名前と状態だけを表示し、引数や実行出力は画面へ表示しません。
+- 利用モデルとTemperatureはAPIサーバー側の`.env`で管理します。
 
 ---
 
@@ -244,7 +262,7 @@ curl -X POST \
   -d '{"content":"1+1を計算してください"}'
 ```
 
-`AUTH_MODE=oidc`では、最初の会話作成リクエストにも`Authorization: Bearer ...`が必要です。`AUTH_MODE=disabled`は既存CLI・Streamlitとのローカル開発互換専用であり、外部公開には使用しないでください。
+`AUTH_MODE=oidc`では、最初の会話作成リクエストにも`Authorization: Bearer ...`が必要です。StreamlitはKeycloakから取得したアクセストークンをサーバー側API呼び出しだけに使用します。`AUTH_MODE=disabled`はローカル開発互換専用であり、外部公開には使用しないでください。
 
 SSEでは `message.started`、`assistant.delta`、`tool.started`、
 `tool.completed`、`message.completed`、`message.failed` のイベントを返します。
@@ -283,4 +301,4 @@ uv run python -m src.db.cleanup --limit 100
 uv run pytest
 ```
 
-現在は53件の自動テストを実行します。
+現在は61件の自動テストを実行します。

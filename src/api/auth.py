@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -11,6 +12,9 @@ import httpx
 import jwt
 
 from src.config import Settings
+
+
+logger = logging.getLogger("langgraph.api.auth")
 
 
 class AuthenticationError(RuntimeError):
@@ -77,6 +81,10 @@ class OpenIDConnectAuthenticator:
                 options={"require": ["exp", "iat", "sub"]},
             )
         except jwt.PyJWTError as error:
+            logger.warning(
+                "access_token.validation_failed.%s",
+                type(error).__name__,
+            )
             raise AuthenticationError("アクセストークンが不正です。") from error
 
         subject = claims.get("sub")
