@@ -3,12 +3,13 @@
 import uuid
 
 import streamlit as st
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 
-from src.agent import create_agent, get_default_checkpointer
+from src.agent import get_default_checkpointer
 from src.config import get_settings
-from src.state import AgentState
+from src.errors import AgentServiceError
+from src.services import AgentService, OllamaModelService, OllamaStatus
 from src.tools import ALL_TOOLS, read_notes
 
 # Page configuration
@@ -19,6 +20,13 @@ st.set_page_config(
 )
 
 settings = get_settings()
+
+
+@st.cache_data(ttl=30, max_entries=10, show_spinner=False)
+def get_ollama_status(base_url: str, timeout_seconds: float) -> OllamaStatus:
+    """Return a short-lived cached Ollama health and model result."""
+    return OllamaModelService(base_url, timeout_seconds).get_status()
+
 
 # Initialize session state. The unguessable ID in the URL acts as the local
 # conversation key so a browser reload can restore the same checkpoint.
@@ -42,12 +50,19 @@ if "checkpointer" not in st.session_state:
 with st.sidebar:
     st.title("⚙️ 設定 & 管理")
 
-    model_options = [
+    fallback_model_options = [
         "qwen3.5:9b-mlx",
         "qwen3.8:27b-mlx",
         "gemma4:12b-mlx",
         "ornith-1.5:9b",
     ]
+    ollama_status = get_ollama_status(
+        settings.ollama_base_url,
+        settings.ollama_health_timeout_seconds,
+    )
+    model_options = list(ollama_status.models) or fallback_model_options
+    if settings.ollama_model not in model_options:
+        model_options.insert(0, settings.ollama_model)
     default_index = 0
     if settings.ollama_model in model_options:
         default_index = model_options.index(settings.ollama_model)
@@ -60,6 +75,10 @@ with st.sidebar:
     custom_model = st.text_input("または直接モデル名を入力", placeholder="例: llama3.3:70b")
     active_model = custom_model.strip() if custom_model.strip() else selected_model
 
+    if ollama_status.available:
+        st.success("Ollamaに接続済みです。", icon=":material/check_circle:")
+    else:
+        st.warning("Ollamaに接続できません。", icon=":material/warning:")
     st.caption(f"Ollama接続先: `{settings.ollama_base_url}`")
     temperature = st.slider("🌡️ Temperature", min_value=0.0, max_value=1.0, value=settings.temperature, step=0.05)
 
@@ -95,22 +114,23 @@ st.caption(f"スレッドID: `{st.session_state.thread_id}` | LangGraphの永続
 # Sync messages from checkpointer if session_state messages is empty
 agent_key = (active_model, settings.ollama_base_url, temperature)
 if st.session_state.get("agent_key") != agent_key:
-    st.session_state.agent = create_agent(
-        model_name=active_model,
-        base_url=settings.ollama_base_url,
-        temperature=temperature,
-        checkpointer=st.session_state.checkpointer,
-    )
+    try:
+        st.session_state.agent_service = AgentService.create(
+            model_name=active_model,
+            base_url=settings.ollama_base_url,
+            temperature=temperature,
+            checkpointer=st.session_state.checkpointer,
+            settings=settings,
+        )
+    except AgentServiceError as error:
+        st.error(error.user_message)
+        st.stop()
     st.session_state.agent_key = agent_key
-agent = st.session_state.agent
-config: RunnableConfig = {
-    "configurable": {"thread_id": st.session_state.thread_id},
-    "recursion_limit": 15,
-}
+agent_service = st.session_state.agent_service
 
 if not st.session_state.messages:
     try:
-        saved_state = agent.get_state(config)
+        saved_state = agent_service.get_state(st.session_state.thread_id)
         if saved_state and saved_state.values and "messages" in saved_state.values:
             history = []
             for msg in saved_state.values["messages"]:
@@ -153,46 +173,41 @@ if prompt := st.chat_input("質問や指示を入力してください...", subm
         execution_error = None
 
         with st.status("エージェントが思考・ツール実行中...", expanded=True) as status:
-            inputs: AgentState = {"messages": [HumanMessage(content=prompt)]}
-
             try:
-                for chunk in agent.stream(inputs, config, stream_mode="updates"):
-                    for node_name, node_output in chunk.items():
-                        messages = node_output.get("messages", [])
-                        for m in messages:
-                            # Tool calls requested by LLM
-                            tool_calls = getattr(m, "tool_calls", None)
-                            if tool_calls:
-                                for tc in tool_calls:
-                                    t_name = tc.get("name", "unknown") if isinstance(tc, dict) else getattr(tc, "name", "unknown")
-                                    t_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
-                                    call_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
-                                    st.write(f"⚙️ ツール呼び出し: **`{t_name}`**")
-                                    event = {"name": t_name, "args": t_args}
-                                    tool_events.append(event)
-                                    if call_id:
-                                        tool_events_by_id[call_id] = event
-                            elif isinstance(m, ToolMessage) or getattr(m, "type", None) == "tool":
-                                tool_name = getattr(m, "name", "tool")
-                                content = getattr(m, "content", "")
-                                call_id = getattr(m, "tool_call_id", None)
-                                st.write(f"📥 ツール実行完了: **`{tool_name}`**")
-                                event = tool_events_by_id.get(call_id)
-                                if event is None:
-                                    event = {"name": tool_name}
-                                    tool_events.append(event)
-                                event["output"] = str(content)
-                            elif (isinstance(m, AIMessage) or getattr(m, "type", None) == "ai") and not tool_calls:
-                                final_response = getattr(m, "content", "")
-
+                for event in agent_service.stream_events(
+                    prompt,
+                    st.session_state.thread_id,
+                ):
+                    if event.type == "tool_started":
+                        st.write(f"⚙️ ツール呼び出し: **`{event.tool_name}`**")
+                        tool_event = {
+                            "name": event.tool_name,
+                            "args": dict(event.tool_args),
+                        }
+                        tool_events.append(tool_event)
+                        if event.tool_call_id:
+                            tool_events_by_id[event.tool_call_id] = tool_event
+                    elif event.type == "tool_completed":
+                        st.write(f"📥 ツール実行完了: **`{event.tool_name}`**")
+                        tool_event = tool_events_by_id.get(event.tool_call_id)
+                        if tool_event is None:
+                            tool_event = {"name": event.tool_name}
+                            tool_events.append(tool_event)
+                        tool_event["output"] = event.content
+                    elif event.type == "assistant_completed":
+                        final_response = event.content
                 status.update(label="完了しました！", state="complete", expanded=False)
-            except Exception as error:
+            except AgentServiceError as error:
                 execution_error = error
                 status.update(label="エラーが発生しました", state="error", expanded=True)
-                st.error(f"実行エラー: {error}")
+                st.error(error.user_message)
+            except Exception:
+                execution_error = True
+                status.update(label="エラーが発生しました", state="error", expanded=True)
+                st.error("予期しないエラーが発生しました。")
 
         if execution_error is not None:
-            error_message = "回答を生成できませんでした。Ollamaの起動状態と設定を確認してください。"
+            error_message = "回答を生成できませんでした。設定を確認してもう一度お試しください。"
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": error_message,

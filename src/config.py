@@ -1,6 +1,7 @@
 """Application configuration management using Pydantic Settings."""
 
 from functools import lru_cache
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,11 +17,16 @@ class Settings(BaseSettings):
     # Ollama settings
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3.5:9b-mlx"
-    temperature: float = 0.2
+    temperature: float = Field(default=0.2, ge=0.0, le=2.0)
 
     # Agent settings
     thread_id: str = "default-session"
-    max_context_tokens: int = 12_000
+    max_context_tokens: int = Field(default=12_000, ge=1_000)
+    recursion_limit: int = Field(default=15, ge=2, le=100)
+    max_tool_calls: int = Field(default=8, ge=1, le=50)
+    agent_timeout_seconds: float = Field(default=120.0, gt=0.0, le=1_800.0)
+    ollama_request_timeout_seconds: float = Field(default=60.0, gt=0.0, le=600.0)
+    ollama_health_timeout_seconds: float = Field(default=3.0, gt=0.0, le=30.0)
     system_prompt: str = (
         "あなたは親切で優秀なAIアシスタントです。\n"
         "ユーザーの質問やリクエストに対して、必要に応じて提供されたツール（Web検索、計算機、日時取得、メモ管理など）を活用して回答してください。\n"
