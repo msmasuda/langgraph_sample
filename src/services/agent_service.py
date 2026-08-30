@@ -291,3 +291,17 @@ class AgentService:
     async def aget_state(self, thread_id: str) -> Any:
         """Asynchronously return the latest persisted state for a thread."""
         return await self.graph.aget_state(self._config(thread_id))
+
+    async def adelete_thread(self, thread_id: str) -> None:
+        """Delete all persisted checkpoints for a thread."""
+        checkpointer = getattr(self.graph, "checkpointer", None)
+        delete_thread = getattr(checkpointer, "adelete_thread", None)
+        if delete_thread is None:
+            raise AgentExecutionError()
+        try:
+            await delete_thread(self._config(thread_id)["configurable"]["thread_id"])
+        except Exception as error:
+            converted = self._convert_error(error)
+            if converted is error:
+                raise
+            raise converted from error

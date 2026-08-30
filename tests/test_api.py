@@ -2,10 +2,12 @@
 
 import asyncio
 import uuid
+from types import SimpleNamespace
 
 import httpx
 import pytest
 from fastapi import Request
+from langchain_core.messages import AIMessage, HumanMessage
 
 from src.api.app import create_app
 from src.api.schemas import MessageRequest
@@ -39,6 +41,7 @@ class StubAgentService:
     def __init__(self) -> None:
         self.invoke_calls = 0
         self.stream_calls = 0
+        self.deleted_threads: list[str] = []
 
     async def ainvoke(self, prompt: str, thread_id: str) -> AgentRunResult:
         self.invoke_calls += 1
@@ -108,12 +111,26 @@ class StubAgentService:
             content="答えは2です。",
         )
 
+    async def aget_state(self, thread_id: str):
+        return SimpleNamespace(
+            values={
+                "messages": [
+                    HumanMessage(content="質問", id="user-1"),
+                    AIMessage(content="回答", id="assistant-1"),
+                ]
+            }
+        )
+
+    async def adelete_thread(self, thread_id: str) -> None:
+        self.deleted_threads.append(thread_id)
+
 
 def make_test_app(
     *,
     agent_service=None,
     model_available: bool = True,
     conversation_store=None,
+    note_store=None,
     execution_registry=None,
 ):
     return create_app(
@@ -121,10 +138,13 @@ def make_test_app(
             api_max_message_chars=20_000,
             idempotency_ttl_seconds=60,
             idempotency_max_entries=20,
+            database_url=None,
+            checkpoint_database_url=None,
         ),
         agent_service=agent_service or StubAgentService(),
         model_service=StubModelService(model_available),
         conversation_store=conversation_store,
+        note_store=note_store,
         execution_registry=execution_registry,
     )
 
@@ -157,6 +177,10 @@ async def test_health_request_id_and_openapi_paths():
         "/ready",
         "/v1/models",
         "/v1/conversations",
+        "/v1/conversations/{conversation_id}",
+        "/v1/conversations/{conversation_id}/cancel",
+        "/v1/conversations/{conversation_id}/notes",
+        "/v1/conversations/{conversation_id}/notes/{note_id}",
         "/v1/conversations/{conversation_id}/messages",
         "/v1/conversations/{conversation_id}/messages/stream",
     }
@@ -423,3 +447,150 @@ async def test_disconnected_sse_releases_conversation_reservation():
     assert chunks == []
     assert reserved_again is True
     assert agent.stream_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_conversation_crud_history_and_archive_guard():
+    agent = StubAgentService()
+    app = make_test_app(agent_service=agent)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as client:
+        created = await client.post(
+            "/v1/conversations",
+            json={"title": "調査用の会話"},
+        )
+        conversation_id = created.json()["id"]
+        listed = await client.get("/v1/conversations")
+        detail = await client.get(f"/v1/conversations/{conversation_id}")
+        history = await client.get(
+            f"/v1/conversations/{conversation_id}/messages"
+        )
+        archived = await client.patch(
+            f"/v1/conversations/{conversation_id}",
+            json={"title": "完了した調査", "status": "archived"},
+        )
+        rejected = await client.post(
+            f"/v1/conversations/{conversation_id}/messages",
+            json={"content": "追加質問"},
+        )
+        deleted = await client.delete(f"/v1/conversations/{conversation_id}")
+        missing = await client.get(f"/v1/conversations/{conversation_id}")
+
+    assert created.status_code == 201
+    assert created.json()["title"] == "調査用の会話"
+    assert listed.json()["total"] == 1
+    assert detail.json()["status"] == "active"
+    assert [item["role"] for item in history.json()["items"]] == [
+        "user",
+        "assistant",
+    ]
+    assert archived.json()["title"] == "完了した調査"
+    assert archived.json()["status"] == "archived"
+    assert rejected.status_code == 409
+    assert rejected.json()["error"]["code"] == "conversation_archived"
+    assert deleted.status_code == 204
+    assert missing.status_code == 404
+    assert agent.deleted_threads == [conversation_id]
+
+
+@pytest.mark.asyncio
+async def test_note_crud_is_scoped_to_conversation():
+    app = make_test_app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as client:
+        conversation_id = await create_conversation(client)
+        created = await client.post(
+            f"/v1/conversations/{conversation_id}/notes",
+            json={"title": "重要", "content": "確認事項"},
+        )
+        note_id = created.json()["id"]
+        listed = await client.get(
+            f"/v1/conversations/{conversation_id}/notes"
+        )
+        updated = await client.patch(
+            f"/v1/conversations/{conversation_id}/notes/{note_id}",
+            json={"content": "確認済み"},
+        )
+        deleted = await client.delete(
+            f"/v1/conversations/{conversation_id}/notes/{note_id}"
+        )
+        missing = await client.patch(
+            f"/v1/conversations/{conversation_id}/notes/{note_id}",
+            json={"title": "なし"},
+        )
+
+    assert created.status_code == 201
+    assert listed.json()["items"][0]["title"] == "重要"
+    assert updated.json()["content"] == "確認済み"
+    assert deleted.status_code == 204
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "note_not_found"
+
+
+@pytest.mark.asyncio
+async def test_cancel_endpoint_marks_an_active_conversation():
+    registry = ConversationExecutionRegistry()
+    app = make_test_app(execution_registry=registry)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as client:
+        conversation_id = await create_conversation(client)
+        conversation_uuid = uuid.UUID(conversation_id)
+        assert await registry.reserve(conversation_uuid) is True
+        response = await client.post(
+            f"/v1/conversations/{conversation_id}/cancel"
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancellation_requested"
+    assert await registry.is_cancel_requested(conversation_uuid) is True
+    await registry.release(conversation_uuid)
+
+
+@pytest.mark.asyncio
+async def test_cancel_endpoint_stops_non_streaming_agent_run():
+    class CancellableAgent(StubAgentService):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+
+        async def ainvoke(self, prompt: str, thread_id: str) -> AgentRunResult:
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled.set()
+
+    agent = CancellableAgent()
+    app = make_test_app(agent_service=agent)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as client:
+        conversation_id = await create_conversation(client)
+        message_task = asyncio.create_task(
+            client.post(
+                f"/v1/conversations/{conversation_id}/messages",
+                json={"content": "長い処理"},
+            )
+        )
+        await asyncio.wait_for(agent.started.wait(), timeout=1)
+        cancelled = await client.post(
+            f"/v1/conversations/{conversation_id}/cancel"
+        )
+        message_response = await asyncio.wait_for(message_task, timeout=1)
+
+    assert cancelled.json()["status"] == "cancellation_requested"
+    assert message_response.status_code == 409
+    assert message_response.json()["error"]["code"] == "message_cancelled"
+    assert agent.cancelled.is_set()

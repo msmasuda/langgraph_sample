@@ -3,21 +3,34 @@
 import asyncio
 import hashlib
 import re
+import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
-from fastapi import FastAPI, Header, Request, Response, status
+from fastapi import FastAPI, Header, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from src.api.runtime import build_lifespan
 from src.api.schemas import (
+    CancelResponse,
+    ConversationCreateRequest,
+    ConversationListResponse,
     ConversationResponse,
+    ConversationUpdateRequest,
     ErrorDetail,
     ErrorResponse,
     HealthResponse,
+    MessageHistoryItem,
+    MessageHistoryResponse,
     MessageRequest,
     MessageResponse,
     ModelListResponse,
+    NoteCreateRequest,
+    NoteListResponse,
+    NoteResponse,
+    NoteUpdateRequest,
     ReadyResponse,
     ToolExecutionResponse,
 )
@@ -37,6 +50,7 @@ from src.services import (
     ConversationExecutionRegistry,
     IdempotencyStore,
     InMemoryConversationStore,
+    InMemoryNoteStore,
     OllamaModelService,
 )
 
@@ -60,6 +74,10 @@ class ApiProblem(RuntimeError):
         self.code = code
         self.message = message
         super().__init__(message)
+
+
+class RunCancelled(RuntimeError):
+    """Internal signal for explicit conversation cancellation."""
 
 
 def _request_id(request: Request) -> str:
@@ -100,7 +118,6 @@ def _agent_error_status(error: AgentServiceError) -> int:
 def _tool_responses(result: AgentRunResult) -> list[ToolExecutionResponse]:
     tool_events: list[ToolExecutionResponse] = []
     by_call_id: dict[str, ToolExecutionResponse] = {}
-
     for event in result.events:
         if event.type == "tool_started":
             tool_response = ToolExecutionResponse(
@@ -113,12 +130,70 @@ def _tool_responses(result: AgentRunResult) -> list[ToolExecutionResponse]:
         elif event.type == "tool_completed":
             tool_response = by_call_id.get(event.tool_call_id or "")
             if tool_response is None:
-                tool_response = ToolExecutionResponse(
-                    name=event.tool_name or "tool",
-                )
+                tool_response = ToolExecutionResponse(name=event.tool_name or "tool")
                 tool_events.append(tool_response)
             tool_response.output = event.content
     return tool_events
+
+
+def _conversation_response(record: Any) -> ConversationResponse:
+    return ConversationResponse(
+        id=record.id,
+        title=record.title,
+        status=record.status,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+        expires_at=record.expires_at,
+    )
+
+
+def _note_response(record: Any) -> NoteResponse:
+    return NoteResponse(
+        id=record.id,
+        conversation_id=record.conversation_id,
+        title=record.title,
+        content=record.content,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
+
+
+def _message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(block.get("text", ""))
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return str(content)
+
+
+def _history_items(snapshot: Any) -> list[MessageHistoryItem]:
+    values = getattr(snapshot, "values", {}) or {}
+    messages = values.get("messages", []) if isinstance(values, dict) else []
+    items: list[MessageHistoryItem] = []
+    for index, message in enumerate(messages):
+        if isinstance(message, HumanMessage):
+            role = "user"
+        elif isinstance(message, ToolMessage):
+            role = "tool"
+        elif isinstance(message, AIMessage):
+            role = "assistant"
+        else:
+            continue
+        items.append(
+            MessageHistoryItem(
+                id=str(getattr(message, "id", None) or index),
+                role=role,
+                content=_message_text(getattr(message, "content", "")),
+                name=getattr(message, "name", None),
+                tool_call_id=getattr(message, "tool_call_id", None),
+                tool_calls=list(getattr(message, "tool_calls", []) or []),
+            )
+        )
+    return items
 
 
 def create_app(
@@ -126,34 +201,47 @@ def create_app(
     settings: Settings | None = None,
     agent_service: Any | None = None,
     model_service: Any | None = None,
-    conversation_store: InMemoryConversationStore | None = None,
-    execution_registry: ConversationExecutionRegistry | None = None,
-    idempotency_store: IdempotencyStore | None = None,
+    conversation_store: Any | None = None,
+    note_store: Any | None = None,
+    execution_registry: Any | None = None,
+    idempotency_store: Any | None = None,
+    run_store: Any | None = None,
+    use_database: bool | None = None,
 ) -> FastAPI:
     """Create an API application with replaceable services for tests."""
     active_settings = settings or get_settings()
+    managed_database = (
+        bool(active_settings.database_url)
+        and agent_service is None
+        and conversation_store is None
+        if use_database is None
+        else use_database
+    )
     app = FastAPI(
         title="LangGraph Ollama Agent API",
-        version="0.2.0",
+        version="0.3.0",
         description="Web・モバイル向けLangGraphエージェントAPI",
+        lifespan=build_lifespan(active_settings, enabled=managed_database),
     )
-
     app.state.settings = active_settings
-    app.state.agent_service = agent_service or AgentService.create(
-        settings=active_settings
+    app.state.agent_service = agent_service or (
+        None if managed_database else AgentService.create(settings=active_settings)
     )
     app.state.model_service = model_service or OllamaModelService(
         active_settings.ollama_base_url,
         active_settings.ollama_health_timeout_seconds,
     )
     app.state.conversation_store = conversation_store or InMemoryConversationStore()
-    app.state.execution_registry = (
-        execution_registry or ConversationExecutionRegistry()
-    )
+    app.state.note_store = note_store or InMemoryNoteStore()
+    app.state.execution_registry = execution_registry or ConversationExecutionRegistry()
     app.state.idempotency_store = idempotency_store or IdempotencyStore(
         ttl_seconds=active_settings.idempotency_ttl_seconds,
         max_entries=active_settings.idempotency_max_entries,
     )
+    app.state.run_store = run_store
+    app.state.database_manager = None
+    app.state.checkpoint_manager = None
+    current_user_id = active_settings.default_user_id
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next: Any) -> Response:
@@ -186,14 +274,30 @@ def create_app(
             message=error.user_message,
         )
 
-    async def require_conversation(conversation_id: uuid.UUID) -> None:
-        record = await app.state.conversation_store.get(conversation_id)
+    @app.exception_handler(Exception)
+    async def handle_unexpected_error(
+        request: Request,
+        _error: Exception,
+    ) -> JSONResponse:
+        return _error_response(
+            request,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            code="internal_error",
+            message="内部処理でエラーが発生しました。",
+        )
+
+    async def require_conversation(conversation_id: uuid.UUID) -> Any:
+        record = await app.state.conversation_store.get(
+            conversation_id,
+            user_id=current_user_id,
+        )
         if record is None:
             raise ApiProblem(
                 status.HTTP_404_NOT_FOUND,
                 "conversation_not_found",
                 "指定された会話が見つかりません。",
             )
+        return record
 
     async def reserve_conversation(conversation_id: uuid.UUID) -> None:
         if not await app.state.execution_registry.reserve(conversation_id):
@@ -201,6 +305,14 @@ def create_app(
                 status.HTTP_409_CONFLICT,
                 "conversation_busy",
                 "この会話では別のメッセージを処理中です。",
+            )
+
+    def validate_active_conversation(record: Any) -> None:
+        if record.status != "active":
+            raise ApiProblem(
+                status.HTTP_409_CONFLICT,
+                "conversation_archived",
+                "アーカイブ済みの会話にはメッセージを送信できません。",
             )
 
     def validate_message_length(message: MessageRequest) -> None:
@@ -211,6 +323,66 @@ def create_app(
                 "メッセージが長すぎます。",
             )
 
+    async def invoke_with_cancellation(
+        conversation_id: uuid.UUID,
+        prompt: str,
+        thread_id: str,
+    ) -> AgentRunResult:
+        task = asyncio.create_task(app.state.agent_service.ainvoke(prompt, thread_id))
+        try:
+            while not task.done():
+                await asyncio.wait({task}, timeout=0.25)
+                if await app.state.execution_registry.is_cancel_requested(
+                    conversation_id
+                ):
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    raise ApiProblem(
+                        status.HTTP_409_CONFLICT,
+                        "message_cancelled",
+                        "メッセージ処理をキャンセルしました。",
+                    )
+            return await task
+        except asyncio.CancelledError:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+
+    async def cancellable_events(
+        conversation_id: uuid.UUID,
+        prompt: str,
+        thread_id: str,
+        request: Request,
+    ) -> AsyncIterator[AgentEvent]:
+        iterator = app.state.agent_service.astream_events(
+            prompt,
+            thread_id,
+            include_tokens=True,
+        ).__aiter__()
+        try:
+            while True:
+                next_event = asyncio.create_task(anext(iterator))
+                while not next_event.done():
+                    await asyncio.wait({next_event}, timeout=0.25)
+                    if await request.is_disconnected():
+                        next_event.cancel()
+                        await asyncio.gather(next_event, return_exceptions=True)
+                        return
+                    if await app.state.execution_registry.is_cancel_requested(
+                        conversation_id
+                    ):
+                        next_event.cancel()
+                        await asyncio.gather(next_event, return_exceptions=True)
+                        raise RunCancelled()
+                try:
+                    yield await next_event
+                except StopAsyncIteration:
+                    return
+        finally:
+            close = getattr(iterator, "aclose", None)
+            if close is not None:
+                await close()
+
     @app.get("/health", response_model=HealthResponse, tags=["system"])
     async def health() -> HealthResponse:
         return HealthResponse()
@@ -218,15 +390,25 @@ def create_app(
     @app.get(
         "/ready",
         response_model=ReadyResponse,
+        response_model_exclude_none=True,
         responses={503: {"model": ReadyResponse}},
         tags=["system"],
     )
     async def ready(response: Response) -> ReadyResponse:
         ollama_status = await app.state.model_service.aget_status()
-        if not ollama_status.available:
+        database_available: bool | None = None
+        if active_settings.database_url:
+            database_available = bool(
+                app.state.database_manager and await app.state.database_manager.ping()
+            )
+        if not ollama_status.available or database_available is False:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-            return ReadyResponse(status="not_ready", ollama=False)
-        return ReadyResponse(status="ready", ollama=True)
+            return ReadyResponse(
+                status="not_ready",
+                ollama=ollama_status.available,
+                database=database_available,
+            )
+        return ReadyResponse(status="ready", ollama=True, database=database_available)
 
     @app.get(
         "/v1/models",
@@ -250,9 +432,127 @@ def create_app(
         status_code=status.HTTP_201_CREATED,
         tags=["conversations"],
     )
-    async def create_conversation() -> ConversationResponse:
-        record = await app.state.conversation_store.create()
-        return ConversationResponse(id=record.id, created_at=record.created_at)
+    async def create_conversation(
+        payload: ConversationCreateRequest | None = None,
+    ) -> ConversationResponse:
+        record = await app.state.conversation_store.create(
+            user_id=current_user_id,
+            title=payload.title if payload else "新しい会話",
+            retention_days=active_settings.conversation_retention_days,
+        )
+        return _conversation_response(record)
+
+    @app.get(
+        "/v1/conversations",
+        response_model=ConversationListResponse,
+        tags=["conversations"],
+    )
+    async def list_conversations(
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> ConversationListResponse:
+        records, total = await app.state.conversation_store.list(
+            user_id=current_user_id,
+            limit=limit,
+            offset=offset,
+        )
+        return ConversationListResponse(
+            items=[_conversation_response(record) for record in records],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.get(
+        "/v1/conversations/{conversation_id}",
+        response_model=ConversationResponse,
+        responses={404: {"model": ErrorResponse}},
+        tags=["conversations"],
+    )
+    async def get_conversation(conversation_id: uuid.UUID) -> ConversationResponse:
+        return _conversation_response(await require_conversation(conversation_id))
+
+    @app.patch(
+        "/v1/conversations/{conversation_id}",
+        response_model=ConversationResponse,
+        responses={404: {"model": ErrorResponse}},
+        tags=["conversations"],
+    )
+    async def update_conversation(
+        conversation_id: uuid.UUID,
+        payload: ConversationUpdateRequest,
+    ) -> ConversationResponse:
+        if payload.title is None and payload.status is None:
+            raise ApiProblem(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "empty_update",
+                "更新する項目を指定してください。",
+            )
+        record = await app.state.conversation_store.update(
+            conversation_id,
+            user_id=current_user_id,
+            title=payload.title,
+            status=payload.status,
+        )
+        if record is None:
+            await require_conversation(conversation_id)
+            raise AssertionError("unreachable")
+        return _conversation_response(record)
+
+    @app.delete(
+        "/v1/conversations/{conversation_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+        tags=["conversations"],
+    )
+    async def delete_conversation(conversation_id: uuid.UUID) -> Response:
+        record = await require_conversation(conversation_id)
+        await reserve_conversation(conversation_id)
+        try:
+            await app.state.agent_service.adelete_thread(record.thread_id)
+            await app.state.note_store.delete_for_conversation(conversation_id)
+            await app.state.idempotency_store.delete_resource(str(conversation_id))
+            deleted = await app.state.conversation_store.delete(
+                conversation_id,
+                user_id=current_user_id,
+            )
+            if not deleted:
+                raise ApiProblem(
+                    status.HTTP_404_NOT_FOUND,
+                    "conversation_not_found",
+                    "指定された会話が見つかりません。",
+                )
+        finally:
+            await app.state.execution_registry.release(conversation_id)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.get(
+        "/v1/conversations/{conversation_id}/messages",
+        response_model=MessageHistoryResponse,
+        responses={404: {"model": ErrorResponse}},
+        tags=["messages"],
+    )
+    async def list_messages(conversation_id: uuid.UUID) -> MessageHistoryResponse:
+        record = await require_conversation(conversation_id)
+        snapshot = await app.state.agent_service.aget_state(record.thread_id)
+        return MessageHistoryResponse(
+            conversation_id=conversation_id,
+            items=_history_items(snapshot),
+        )
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/cancel",
+        response_model=CancelResponse,
+        responses={404: {"model": ErrorResponse}},
+        tags=["messages"],
+    )
+    async def cancel_message(conversation_id: uuid.UUID) -> CancelResponse:
+        await require_conversation(conversation_id)
+        requested = await app.state.execution_registry.request_cancel(conversation_id)
+        return CancelResponse(
+            conversation_id=conversation_id,
+            status="cancellation_requested" if requested else "not_running",
+        )
 
     @app.post(
         "/v1/conversations/{conversation_id}/messages",
@@ -272,15 +572,13 @@ def create_app(
         response: Response,
         idempotency_key: IdempotencyKey = None,
     ) -> MessageResponse:
-        await require_conversation(conversation_id)
+        record = await require_conversation(conversation_id)
+        validate_active_conversation(record)
         validate_message_length(message)
         fingerprint = _message_fingerprint(message)
-
         if idempotency_key:
             cached = await app.state.idempotency_store.get(
-                "message",
-                str(conversation_id),
-                idempotency_key,
+                "message", str(conversation_id), idempotency_key
             )
             if cached is not None:
                 cached_fingerprint, cached_response = cached
@@ -293,26 +591,46 @@ def create_app(
                             "使用されています。"
                         ),
                     )
-                if not isinstance(cached_response, MessageResponse):
+                try:
+                    completed = (
+                        cached_response
+                        if isinstance(cached_response, MessageResponse)
+                        else MessageResponse.model_validate(cached_response)
+                    )
+                except Exception as error:
                     raise ApiProblem(
                         status.HTTP_409_CONFLICT,
                         "idempotency_conflict",
                         "冪等性キーを再利用できません。",
-                    )
+                    ) from error
                 response.headers["Idempotency-Replayed"] = "true"
-                return cached_response
+                return completed
 
         await reserve_conversation(conversation_id)
+        started_at = time.perf_counter()
         try:
-            result = await app.state.agent_service.ainvoke(
-                message.content,
-                str(conversation_id),
+            result = await invoke_with_cancellation(
+                conversation_id, message.content, record.thread_id
             )
+            tool_events = _tool_responses(result)
             completed = MessageResponse(
                 id=uuid.uuid4(),
                 conversation_id=conversation_id,
                 content=result.response,
-                tool_events=_tool_responses(result),
+                tool_events=tool_events,
+            )
+            if app.state.run_store is not None:
+                await app.state.run_store.record_completed(
+                    conversation_id=conversation_id,
+                    message_id=completed.id,
+                    model=active_settings.ollama_model,
+                    prompt=message.content,
+                    response=result.response,
+                    duration_ms=int((time.perf_counter() - started_at) * 1_000),
+                    tool_events=tool_events,
+                )
+            await app.state.conversation_store.touch(
+                conversation_id, user_id=current_user_id
             )
             if idempotency_key:
                 await app.state.idempotency_store.put(
@@ -345,16 +663,14 @@ def create_app(
         request: Request,
         idempotency_key: IdempotencyKey = None,
     ) -> StreamingResponse:
-        await require_conversation(conversation_id)
+        record = await require_conversation(conversation_id)
+        validate_active_conversation(record)
         validate_message_length(message)
         request_id = _request_id(request)
         fingerprint = _message_fingerprint(message)
-
         if idempotency_key:
             cached = await app.state.idempotency_store.get(
-                "stream",
-                str(conversation_id),
-                idempotency_key,
+                "stream", str(conversation_id), idempotency_key
             )
             if cached is not None:
                 cached_fingerprint, cached_chunks = cached
@@ -367,7 +683,9 @@ def create_app(
                             "使用されています。"
                         ),
                     )
-                if not isinstance(cached_chunks, tuple):
+                if not isinstance(cached_chunks, (tuple, list)) or not all(
+                    isinstance(chunk, str) for chunk in cached_chunks
+                ):
                     raise ApiProblem(
                         status.HTTP_409_CONFLICT,
                         "idempotency_conflict",
@@ -396,16 +714,14 @@ def create_app(
             chunks: list[str] = []
             final_content = ""
             delta_content: list[str] = []
+            observed_events: list[AgentEvent] = []
             sequence = 0
+            started_at = time.perf_counter()
 
             def event_chunk(event: str, data: dict[str, Any]) -> str:
                 nonlocal sequence
                 sequence += 1
-                return encode_sse(
-                    event,
-                    data,
-                    event_id=f"{message_id}:{sequence}",
-                )
+                return encode_sse(event, data, event_id=f"{message_id}:{sequence}")
 
             try:
                 if await request.is_disconnected():
@@ -420,23 +736,18 @@ def create_app(
                 )
                 chunks.append(started)
                 yield started
-
-                async for event in app.state.agent_service.astream_events(
+                async for event in cancellable_events(
+                    conversation_id,
                     message.content,
-                    str(conversation_id),
-                    include_tokens=True,
+                    record.thread_id,
+                    request,
                 ):
-                    if await request.is_disconnected():
-                        return
-
+                    observed_events.append(event)
                     if event.type == "assistant_delta":
                         delta_content.append(event.content)
                         chunk = event_chunk(
                             "assistant.delta",
-                            {
-                                "message_id": str(message_id),
-                                "delta": event.content,
-                            },
+                            {"message_id": str(message_id), "delta": event.content},
                         )
                     elif event.type == "tool_started":
                         chunk = event_chunk(
@@ -463,16 +774,37 @@ def create_app(
                         continue
                     else:
                         continue
-
                     chunks.append(chunk)
                     yield chunk
 
+                if await request.is_disconnected():
+                    return
+                final_content = final_content or "".join(delta_content)
+                tool_events = _tool_responses(
+                    AgentRunResult(
+                        response=final_content,
+                        events=tuple(observed_events),
+                    )
+                )
+                if app.state.run_store is not None:
+                    await app.state.run_store.record_completed(
+                        conversation_id=conversation_id,
+                        message_id=message_id,
+                        model=active_settings.ollama_model,
+                        prompt=message.content,
+                        response=final_content,
+                        duration_ms=int((time.perf_counter() - started_at) * 1_000),
+                        tool_events=tool_events,
+                    )
+                await app.state.conversation_store.touch(
+                    conversation_id, user_id=current_user_id
+                )
                 completed = event_chunk(
                     "message.completed",
                     {
                         "message_id": str(message_id),
                         "conversation_id": str(conversation_id),
-                        "content": final_content or "".join(delta_content),
+                        "content": final_content,
                     },
                 )
                 chunks.append(completed)
@@ -485,6 +817,15 @@ def create_app(
                         tuple(chunks),
                     )
                 yield completed
+            except RunCancelled:
+                yield event_chunk(
+                    "message.failed",
+                    {
+                        "message_id": str(message_id),
+                        "code": "message_cancelled",
+                        "message": "メッセージ処理をキャンセルしました。",
+                    },
+                )
             except asyncio.CancelledError:
                 raise
             except AgentServiceError as error:
@@ -512,11 +853,98 @@ def create_app(
         return StreamingResponse(
             event_stream(),
             media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    @app.get(
+        "/v1/conversations/{conversation_id}/notes",
+        response_model=NoteListResponse,
+        responses={404: {"model": ErrorResponse}},
+        tags=["notes"],
+    )
+    async def list_notes(conversation_id: uuid.UUID) -> NoteListResponse:
+        await require_conversation(conversation_id)
+        notes = await app.state.note_store.list(
+            conversation_id, user_id=current_user_id
+        )
+        return NoteListResponse(items=[_note_response(note) for note in notes])
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/notes",
+        response_model=NoteResponse,
+        status_code=status.HTTP_201_CREATED,
+        responses={404: {"model": ErrorResponse}},
+        tags=["notes"],
+    )
+    async def create_note(
+        conversation_id: uuid.UUID,
+        payload: NoteCreateRequest,
+    ) -> NoteResponse:
+        await require_conversation(conversation_id)
+        note = await app.state.note_store.create(
+            conversation_id,
+            user_id=current_user_id,
+            title=payload.title,
+            content=payload.content,
+        )
+        return _note_response(note)
+
+    @app.patch(
+        "/v1/conversations/{conversation_id}/notes/{note_id}",
+        response_model=NoteResponse,
+        responses={404: {"model": ErrorResponse}},
+        tags=["notes"],
+    )
+    async def update_note(
+        conversation_id: uuid.UUID,
+        note_id: uuid.UUID,
+        payload: NoteUpdateRequest,
+    ) -> NoteResponse:
+        await require_conversation(conversation_id)
+        if payload.title is None and payload.content is None:
+            raise ApiProblem(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "empty_update",
+                "更新する項目を指定してください。",
+            )
+        note = await app.state.note_store.update(
+            conversation_id,
+            note_id,
+            user_id=current_user_id,
+            title=payload.title,
+            content=payload.content,
+        )
+        if note is None:
+            raise ApiProblem(
+                status.HTTP_404_NOT_FOUND,
+                "note_not_found",
+                "指定されたメモが見つかりません。",
+            )
+        return _note_response(note)
+
+    @app.delete(
+        "/v1/conversations/{conversation_id}/notes/{note_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        responses={404: {"model": ErrorResponse}},
+        tags=["notes"],
+    )
+    async def delete_note(
+        conversation_id: uuid.UUID,
+        note_id: uuid.UUID,
+    ) -> Response:
+        await require_conversation(conversation_id)
+        deleted = await app.state.note_store.delete(
+            conversation_id,
+            note_id,
+            user_id=current_user_id,
+        )
+        if not deleted:
+            raise ApiProblem(
+                status.HTTP_404_NOT_FOUND,
+                "note_not_found",
+                "指定されたメモが見つかりません。",
+            )
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     return app
 
