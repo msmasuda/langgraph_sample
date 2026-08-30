@@ -1,10 +1,11 @@
 [project]
 name = "langgraph-ollama-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "Autonomous agent application using LangGraph, Python, and Ollama"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "fastapi>=0.134.0",
     "langgraph>=0.2.60",
     "langchain-core>=0.3.30",
     "langchain-ollama>=0.2.0",
@@ -17,6 +18,7 @@ dependencies = [
     "ddgs>=9.16.0",
     "httpx>=0.28.0",
     "langgraph-checkpoint-sqlite>=3.1.1",
+    "uvicorn>=0.52.0",
 ]
 
 [dependency-groups]
