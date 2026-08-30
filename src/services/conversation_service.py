@@ -46,6 +46,7 @@ class InMemoryConversationStore:
 
     def __init__(self) -> None:
         self._records: dict[uuid.UUID, ConversationRecord] = {}
+        self._users: dict[str, uuid.UUID] = {}
         self._lock = asyncio.Lock()
 
     async def ensure_user(
@@ -54,6 +55,19 @@ class InMemoryConversationStore:
         external_subject: str,
     ) -> None:
         """Accept the compatibility user without external persistence."""
+        async with self._lock:
+            self._users.setdefault(external_subject, user_id)
+
+    async def get_or_create_user(
+        self,
+        external_subject: str,
+        *,
+        display_name: str | None = None,
+    ) -> uuid.UUID:
+        """Resolve a stable internal user ID for an external OIDC subject."""
+        del display_name
+        async with self._lock:
+            return self._users.setdefault(external_subject, uuid.uuid4())
 
     async def create(
         self,

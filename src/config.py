@@ -1,6 +1,7 @@
 """Application configuration management using Pydantic Settings."""
 
 from functools import lru_cache
+from typing import Literal
 from uuid import UUID
 
 from pydantic import Field
@@ -36,6 +37,15 @@ class Settings(BaseSettings):
     api_max_message_chars: int = Field(default=20_000, ge=1, le=20_000)
     idempotency_ttl_seconds: float = Field(default=3_600.0, gt=0.0, le=86_400.0)
     idempotency_max_entries: int = Field(default=1_000, ge=1, le=100_000)
+
+    # Authentication settings
+    auth_mode: Literal["disabled", "oidc"] = "disabled"
+    oidc_issuer_url: str | None = None
+    oidc_audience: str = "langgraph-api"
+    oidc_jwks_url: str | None = None
+    oidc_jwks_cache_seconds: float = Field(default=300.0, gt=0.0, le=86_400.0)
+    oidc_http_timeout_seconds: float = Field(default=5.0, gt=0.0, le=30.0)
+    oidc_clock_skew_seconds: int = Field(default=30, ge=0, le=300)
 
     # PostgreSQL settings (optional to preserve the local SQLite interfaces)
     database_url: str | None = None

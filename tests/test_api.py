@@ -43,10 +43,17 @@ class StubAgentService:
         self.stream_calls = 0
         self.deleted_threads: list[str] = []
 
-    async def ainvoke(self, prompt: str, thread_id: str) -> AgentRunResult:
+    async def ainvoke(
+        self,
+        prompt: str,
+        thread_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> AgentRunResult:
         self.invoke_calls += 1
         assert prompt
         assert uuid.UUID(thread_id)
+        assert user_id is None or uuid.UUID(user_id)
         events = (
             AgentEvent(
                 type="tool_started",
@@ -76,10 +83,12 @@ class StubAgentService:
         thread_id: str,
         *,
         include_tokens: bool = False,
+        user_id: str | None = None,
     ):
         self.stream_calls += 1
         assert prompt
         assert uuid.UUID(thread_id)
+        assert user_id is None or uuid.UUID(user_id)
         assert include_tokens is True
         yield AgentEvent(
             type="assistant_delta",
@@ -111,7 +120,8 @@ class StubAgentService:
             content="答えは2です。",
         )
 
-    async def aget_state(self, thread_id: str):
+    async def aget_state(self, thread_id: str, *, user_id: str | None = None):
+        assert user_id is None or uuid.UUID(user_id)
         return SimpleNamespace(
             values={
                 "messages": [
@@ -135,6 +145,7 @@ def make_test_app(
 ):
     return create_app(
         settings=Settings(
+            auth_mode="disabled",
             api_max_message_chars=20_000,
             idempotency_ttl_seconds=60,
             idempotency_max_entries=20,
@@ -279,7 +290,7 @@ async def test_unknown_conversation_returns_safe_error():
 @pytest.mark.asyncio
 async def test_non_streaming_agent_error_uses_safe_envelope():
     class FailingAgent(StubAgentService):
-        async def ainvoke(self, prompt: str, thread_id: str) -> AgentRunResult:
+        async def ainvoke(self, prompt: str, thread_id: str, **_kwargs) -> AgentRunResult:
             raise AgentConnectionError() from RuntimeError("internal host detail")
 
     app = make_test_app(agent_service=FailingAgent())
@@ -373,10 +384,10 @@ async def test_same_conversation_rejects_overlapping_messages():
             self.started = asyncio.Event()
             self.release = asyncio.Event()
 
-        async def ainvoke(self, prompt: str, thread_id: str) -> AgentRunResult:
+        async def ainvoke(self, prompt: str, thread_id: str, **kwargs) -> AgentRunResult:
             self.started.set()
             await self.release.wait()
-            return await super().ainvoke(prompt, thread_id)
+            return await super().ainvoke(prompt, thread_id, **kwargs)
 
     agent = BlockingAgent()
     app = make_test_app(agent_service=agent)
@@ -439,6 +450,7 @@ async def test_disconnected_sse_releases_conversation_reservation():
         conversation_id=record.id,
         message=MessageRequest(content="質問"),
         request=request,
+        user_id=record.user_id,
         idempotency_key=None,
     )
     chunks = [chunk async for chunk in response.body_iterator]
@@ -563,7 +575,7 @@ async def test_cancel_endpoint_stops_non_streaming_agent_run():
             self.started = asyncio.Event()
             self.cancelled = asyncio.Event()
 
-        async def ainvoke(self, prompt: str, thread_id: str) -> AgentRunResult:
+        async def ainvoke(self, prompt: str, thread_id: str, **_kwargs) -> AgentRunResult:
             self.started.set()
             try:
                 await asyncio.Event().wait()

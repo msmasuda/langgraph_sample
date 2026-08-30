@@ -8,10 +8,16 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
-from fastapi import FastAPI, Header, Query, Request, Response, status
+from fastapi import Depends, FastAPI, Header, Query, Request, Response, Security, status
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from src.api.auth import (
+    AuthenticationError,
+    AuthenticationUnavailable,
+    OpenIDConnectAuthenticator,
+)
 from src.api.runtime import build_lifespan
 from src.api.schemas import (
     CancelResponse,
@@ -69,10 +75,18 @@ IdempotencyKey = Annotated[
 class ApiProblem(RuntimeError):
     """Expected API problem rendered through the common error envelope."""
 
-    def __init__(self, status_code: int, code: str, message: str) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.status_code = status_code
         self.code = code
         self.message = message
+        self.headers = headers
         super().__init__(message)
 
 
@@ -94,6 +108,7 @@ def _error_response(
     status_code: int,
     code: str,
     message: str,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     payload = ErrorResponse(
         error=ErrorDetail(
@@ -102,7 +117,11 @@ def _error_response(
             request_id=_request_id(request),
         )
     )
-    return JSONResponse(status_code=status_code, content=payload.model_dump(mode="json"))
+    return JSONResponse(
+        status_code=status_code,
+        content=payload.model_dump(mode="json"),
+        headers=headers,
+    )
 
 
 def _agent_error_status(error: AgentServiceError) -> int:
@@ -206,6 +225,7 @@ def create_app(
     execution_registry: Any | None = None,
     idempotency_store: Any | None = None,
     run_store: Any | None = None,
+    authenticator: Any | None = None,
     use_database: bool | None = None,
 ) -> FastAPI:
     """Create an API application with replaceable services for tests."""
@@ -219,7 +239,7 @@ def create_app(
     )
     app = FastAPI(
         title="LangGraph Ollama Agent API",
-        version="0.3.0",
+        version="0.4.0",
         description="Web・モバイル向けLangGraphエージェントAPI",
         lifespan=build_lifespan(active_settings, enabled=managed_database),
     )
@@ -241,7 +261,10 @@ def create_app(
     app.state.run_store = run_store
     app.state.database_manager = None
     app.state.checkpoint_manager = None
-    current_user_id = active_settings.default_user_id
+    app.state.authenticator = authenticator or OpenIDConnectAuthenticator(
+        active_settings
+    )
+    bearer_scheme = HTTPBearer(auto_error=False)
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next: Any) -> Response:
@@ -260,6 +283,7 @@ def create_app(
             status_code=error.status_code,
             code=error.code,
             message=error.message,
+            headers=error.headers,
         )
 
     @app.exception_handler(AgentServiceError)
@@ -286,10 +310,56 @@ def create_app(
             message="内部処理でエラーが発生しました。",
         )
 
-    async def require_conversation(conversation_id: uuid.UUID) -> Any:
+    async def resolve_current_user(
+        credentials: Annotated[
+            HTTPAuthorizationCredentials | None,
+            Security(bearer_scheme),
+        ] = None,
+    ) -> uuid.UUID:
+        if active_settings.auth_mode == "disabled":
+            await app.state.conversation_store.ensure_user(
+                active_settings.default_user_id,
+                active_settings.default_user_subject,
+            )
+            return active_settings.default_user_id
+        if credentials is None or credentials.scheme.lower() != "bearer":
+            raise ApiProblem(
+                status.HTTP_401_UNAUTHORIZED,
+                "authentication_required",
+                "Bearerアクセストークンが必要です。",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        try:
+            principal = await app.state.authenticator.authenticate(
+                credentials.credentials
+            )
+        except AuthenticationUnavailable as error:
+            raise ApiProblem(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "authentication_unavailable",
+                "認証サーバーを利用できません。",
+            ) from error
+        except AuthenticationError as error:
+            raise ApiProblem(
+                status.HTTP_401_UNAUTHORIZED,
+                "invalid_access_token",
+                "アクセストークンが無効です。",
+                headers={"WWW-Authenticate": "Bearer error=\"invalid_token\""},
+            ) from error
+        return await app.state.conversation_store.get_or_create_user(
+            principal.subject,
+            display_name=principal.display_name,
+        )
+
+    CurrentUserId = Annotated[uuid.UUID, Depends(resolve_current_user)]
+
+    async def require_conversation(
+        conversation_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> Any:
         record = await app.state.conversation_store.get(
             conversation_id,
-            user_id=current_user_id,
+            user_id=user_id,
         )
         if record is None:
             raise ApiProblem(
@@ -327,8 +397,15 @@ def create_app(
         conversation_id: uuid.UUID,
         prompt: str,
         thread_id: str,
+        user_id: uuid.UUID,
     ) -> AgentRunResult:
-        task = asyncio.create_task(app.state.agent_service.ainvoke(prompt, thread_id))
+        task = asyncio.create_task(
+            app.state.agent_service.ainvoke(
+                prompt,
+                thread_id,
+                user_id=str(user_id),
+            )
+        )
         try:
             while not task.done():
                 await asyncio.wait({task}, timeout=0.25)
@@ -352,12 +429,14 @@ def create_app(
         conversation_id: uuid.UUID,
         prompt: str,
         thread_id: str,
+        user_id: uuid.UUID,
         request: Request,
     ) -> AsyncIterator[AgentEvent]:
         iterator = app.state.agent_service.astream_events(
             prompt,
             thread_id,
             include_tokens=True,
+            user_id=str(user_id),
         ).__aiter__()
         try:
             while True:
@@ -416,7 +495,7 @@ def create_app(
         responses={503: {"model": ErrorResponse}},
         tags=["models"],
     )
-    async def list_models() -> ModelListResponse:
+    async def list_models(_user_id: CurrentUserId) -> ModelListResponse:
         ollama_status = await app.state.model_service.aget_status()
         if not ollama_status.available:
             raise ApiProblem(
@@ -433,10 +512,11 @@ def create_app(
         tags=["conversations"],
     )
     async def create_conversation(
+        user_id: CurrentUserId,
         payload: ConversationCreateRequest | None = None,
     ) -> ConversationResponse:
         record = await app.state.conversation_store.create(
-            user_id=current_user_id,
+            user_id=user_id,
             title=payload.title if payload else "新しい会話",
             retention_days=active_settings.conversation_retention_days,
         )
@@ -448,11 +528,12 @@ def create_app(
         tags=["conversations"],
     )
     async def list_conversations(
+        user_id: CurrentUserId,
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
         offset: Annotated[int, Query(ge=0)] = 0,
     ) -> ConversationListResponse:
         records, total = await app.state.conversation_store.list(
-            user_id=current_user_id,
+            user_id=user_id,
             limit=limit,
             offset=offset,
         )
@@ -469,8 +550,13 @@ def create_app(
         responses={404: {"model": ErrorResponse}},
         tags=["conversations"],
     )
-    async def get_conversation(conversation_id: uuid.UUID) -> ConversationResponse:
-        return _conversation_response(await require_conversation(conversation_id))
+    async def get_conversation(
+        conversation_id: uuid.UUID,
+        user_id: CurrentUserId,
+    ) -> ConversationResponse:
+        return _conversation_response(
+            await require_conversation(conversation_id, user_id)
+        )
 
     @app.patch(
         "/v1/conversations/{conversation_id}",
@@ -481,6 +567,7 @@ def create_app(
     async def update_conversation(
         conversation_id: uuid.UUID,
         payload: ConversationUpdateRequest,
+        user_id: CurrentUserId,
     ) -> ConversationResponse:
         if payload.title is None and payload.status is None:
             raise ApiProblem(
@@ -490,12 +577,12 @@ def create_app(
             )
         record = await app.state.conversation_store.update(
             conversation_id,
-            user_id=current_user_id,
+            user_id=user_id,
             title=payload.title,
             status=payload.status,
         )
         if record is None:
-            await require_conversation(conversation_id)
+            await require_conversation(conversation_id, user_id)
             raise AssertionError("unreachable")
         return _conversation_response(record)
 
@@ -505,8 +592,11 @@ def create_app(
         responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
         tags=["conversations"],
     )
-    async def delete_conversation(conversation_id: uuid.UUID) -> Response:
-        record = await require_conversation(conversation_id)
+    async def delete_conversation(
+        conversation_id: uuid.UUID,
+        user_id: CurrentUserId,
+    ) -> Response:
+        record = await require_conversation(conversation_id, user_id)
         await reserve_conversation(conversation_id)
         try:
             await app.state.agent_service.adelete_thread(record.thread_id)
@@ -514,7 +604,7 @@ def create_app(
             await app.state.idempotency_store.delete_resource(str(conversation_id))
             deleted = await app.state.conversation_store.delete(
                 conversation_id,
-                user_id=current_user_id,
+                user_id=user_id,
             )
             if not deleted:
                 raise ApiProblem(
@@ -532,9 +622,15 @@ def create_app(
         responses={404: {"model": ErrorResponse}},
         tags=["messages"],
     )
-    async def list_messages(conversation_id: uuid.UUID) -> MessageHistoryResponse:
-        record = await require_conversation(conversation_id)
-        snapshot = await app.state.agent_service.aget_state(record.thread_id)
+    async def list_messages(
+        conversation_id: uuid.UUID,
+        user_id: CurrentUserId,
+    ) -> MessageHistoryResponse:
+        record = await require_conversation(conversation_id, user_id)
+        snapshot = await app.state.agent_service.aget_state(
+            record.thread_id,
+            user_id=str(user_id),
+        )
         return MessageHistoryResponse(
             conversation_id=conversation_id,
             items=_history_items(snapshot),
@@ -546,8 +642,11 @@ def create_app(
         responses={404: {"model": ErrorResponse}},
         tags=["messages"],
     )
-    async def cancel_message(conversation_id: uuid.UUID) -> CancelResponse:
-        await require_conversation(conversation_id)
+    async def cancel_message(
+        conversation_id: uuid.UUID,
+        user_id: CurrentUserId,
+    ) -> CancelResponse:
+        await require_conversation(conversation_id, user_id)
         requested = await app.state.execution_registry.request_cancel(conversation_id)
         return CancelResponse(
             conversation_id=conversation_id,
@@ -570,9 +669,10 @@ def create_app(
         conversation_id: uuid.UUID,
         message: MessageRequest,
         response: Response,
+        user_id: CurrentUserId,
         idempotency_key: IdempotencyKey = None,
     ) -> MessageResponse:
-        record = await require_conversation(conversation_id)
+        record = await require_conversation(conversation_id, user_id)
         validate_active_conversation(record)
         validate_message_length(message)
         fingerprint = _message_fingerprint(message)
@@ -610,7 +710,10 @@ def create_app(
         started_at = time.perf_counter()
         try:
             result = await invoke_with_cancellation(
-                conversation_id, message.content, record.thread_id
+                conversation_id,
+                message.content,
+                record.thread_id,
+                user_id,
             )
             tool_events = _tool_responses(result)
             completed = MessageResponse(
@@ -630,7 +733,7 @@ def create_app(
                     tool_events=tool_events,
                 )
             await app.state.conversation_store.touch(
-                conversation_id, user_id=current_user_id
+                conversation_id, user_id=user_id
             )
             if idempotency_key:
                 await app.state.idempotency_store.put(
@@ -661,9 +764,10 @@ def create_app(
         conversation_id: uuid.UUID,
         message: MessageRequest,
         request: Request,
+        user_id: CurrentUserId,
         idempotency_key: IdempotencyKey = None,
     ) -> StreamingResponse:
-        record = await require_conversation(conversation_id)
+        record = await require_conversation(conversation_id, user_id)
         validate_active_conversation(record)
         validate_message_length(message)
         request_id = _request_id(request)
@@ -740,6 +844,7 @@ def create_app(
                     conversation_id,
                     message.content,
                     record.thread_id,
+                    user_id,
                     request,
                 ):
                     observed_events.append(event)
@@ -797,7 +902,7 @@ def create_app(
                         tool_events=tool_events,
                     )
                 await app.state.conversation_store.touch(
-                    conversation_id, user_id=current_user_id
+                    conversation_id, user_id=user_id
                 )
                 completed = event_chunk(
                     "message.completed",
@@ -862,10 +967,13 @@ def create_app(
         responses={404: {"model": ErrorResponse}},
         tags=["notes"],
     )
-    async def list_notes(conversation_id: uuid.UUID) -> NoteListResponse:
-        await require_conversation(conversation_id)
+    async def list_notes(
+        conversation_id: uuid.UUID,
+        user_id: CurrentUserId,
+    ) -> NoteListResponse:
+        await require_conversation(conversation_id, user_id)
         notes = await app.state.note_store.list(
-            conversation_id, user_id=current_user_id
+            conversation_id, user_id=user_id
         )
         return NoteListResponse(items=[_note_response(note) for note in notes])
 
@@ -879,11 +987,12 @@ def create_app(
     async def create_note(
         conversation_id: uuid.UUID,
         payload: NoteCreateRequest,
+        user_id: CurrentUserId,
     ) -> NoteResponse:
-        await require_conversation(conversation_id)
+        await require_conversation(conversation_id, user_id)
         note = await app.state.note_store.create(
             conversation_id,
-            user_id=current_user_id,
+            user_id=user_id,
             title=payload.title,
             content=payload.content,
         )
@@ -899,8 +1008,9 @@ def create_app(
         conversation_id: uuid.UUID,
         note_id: uuid.UUID,
         payload: NoteUpdateRequest,
+        user_id: CurrentUserId,
     ) -> NoteResponse:
-        await require_conversation(conversation_id)
+        await require_conversation(conversation_id, user_id)
         if payload.title is None and payload.content is None:
             raise ApiProblem(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -910,7 +1020,7 @@ def create_app(
         note = await app.state.note_store.update(
             conversation_id,
             note_id,
-            user_id=current_user_id,
+            user_id=user_id,
             title=payload.title,
             content=payload.content,
         )
@@ -931,12 +1041,13 @@ def create_app(
     async def delete_note(
         conversation_id: uuid.UUID,
         note_id: uuid.UUID,
+        user_id: CurrentUserId,
     ) -> Response:
-        await require_conversation(conversation_id)
+        await require_conversation(conversation_id, user_id)
         deleted = await app.state.note_store.delete(
             conversation_id,
             note_id,
-            user_id=current_user_id,
+            user_id=user_id,
         )
         if not deleted:
             raise ApiProblem(

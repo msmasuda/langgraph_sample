@@ -14,11 +14,17 @@ def _thread_id(config: RunnableConfig) -> str:
     return value
 
 
+def _user_id(config: RunnableConfig) -> uuid.UUID:
+    value = str(config.get("configurable", {}).get("user_id", "")).strip()
+    try:
+        return uuid.UUID(value)
+    except ValueError as error:
+        raise ValueError("有効なユーザーIDが必要です") from error
+
+
 def create_database_note_tools(
     conversation_store: Any,
     note_store: Any,
-    *,
-    user_id: uuid.UUID,
 ) -> list[BaseTool]:
     """Build async note tools sharing the API's PostgreSQL repositories."""
 
@@ -34,6 +40,7 @@ def create_database_note_tools(
         if len(title) > 200 or len(content) > 20_000:
             return "メモ保存エラー: タイトルまたは本文が長すぎます。"
         try:
+            user_id = _user_id(config)
             conversation = await conversation_store.get_by_thread_id(
                 _thread_id(config),
                 user_id=user_id,
@@ -54,6 +61,7 @@ def create_database_note_tools(
     async def read_database_notes(config: RunnableConfig) -> str:
         """Read notes saved for the current conversation."""
         try:
+            user_id = _user_id(config)
             conversation = await conversation_store.get_by_thread_id(
                 _thread_id(config),
                 user_id=user_id,

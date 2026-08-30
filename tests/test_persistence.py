@@ -78,9 +78,13 @@ async def test_database_note_tools_share_conversation_store():
     save_note, read_notes = create_database_note_tools(
         conversations,
         notes,
-        user_id=user_id,
     )
-    config = {"configurable": {"thread_id": conversation.thread_id}}
+    config = {
+        "configurable": {
+            "thread_id": conversation.thread_id,
+            "user_id": str(user_id),
+        }
+    }
 
     saved = await save_note.ainvoke(
         {"title": "共有メモ", "content": "APIと同じ保存先"},

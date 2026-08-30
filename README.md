@@ -20,6 +20,8 @@ Web検索、計算機、システム日時取得、メモ管理などのツー�
   - FastAPIによる会話作成、通常応答、Server-Sent Events（SSE）ストリーミングを提供。
   - PostgreSQLによる会話・メモ・実行履歴・冪等性の永続化と複数APIプロセス間の同時実行制御に対応。
   - 会話一覧・更新・削除・履歴・キャンセル、メモCRUD、リクエストID、安全なエラー応答を提供。
+  - Keycloak/OIDCのRS256アクセストークンを検証し、JWTの`sub`ごとに会話・メモを分離。
+  - WEB・モバイルはAuthorization Code + PKCEでログイン可能。`/health`・`/ready`以外のAPIをBearer認証で保護。
 - **Ollama状態確認**:
   - Ollamaへの接続状態とインストール済みモデルを取得し、Web UIへ表示。
 - **充実のツールセット**:
@@ -44,7 +46,9 @@ langgraph_sample/
 ├── .env                        # 設定ファイル (Ollama設定等)
 ├── alembic.ini                 # DBマイグレーション設定
 ├── migrations/                # アプリ用PostgreSQLマイグレーション
-├── deploy/postgres/compose.yaml # PostgreSQL用Docker Compose例
+├── deploy/
+│   ├── postgres/compose.yaml   # PostgreSQL用Docker Compose例
+│   └── keycloak/               # Dockge向けKeycloak・Realm設定
 ├── README.md                   # 本ドキュメント
 ├── src/
 │   ├── __init__.py
@@ -55,6 +59,7 @@ langgraph_sample/
 │   ├── agent.py                # LangGraph ReActエージェント定義 & コンパイル
 │   ├── api/
 │   │   ├── app.py              # FastAPIアプリ、APIエンドポイント
+│   │   ├── auth.py             # OIDC Discovery・JWKS・JWT検証
 │   │   ├── runtime.py          # PostgreSQL・チェックポインタのライフサイクル
 │   │   ├── schemas.py          # API入出力スキーマ
 │   │   └── sse.py              # SSEイベントエンコード
@@ -77,6 +82,7 @@ langgraph_sample/
 │   ├── test_tools.py           # ツール群の単体テスト
 │   ├── test_agent.py           # 同期・非同期グラフ構築・動作テスト
 │   ├── test_api.py             # HTTP API、SSE、冪等性・同時実行テスト
+│   ├── test_auth.py            # JWT検証・認証必須・ユーザー分離テスト
 │   ├── test_persistence.py     # DBリポジトリ・メモ・保存期限テスト
 │   └── test_services.py        # 共通サービス、実行上限、Ollama状態テスト
 └── data/                       # 会話履歴・メモのSQLite保存先 (自動生成、Git対象外)
@@ -132,6 +138,9 @@ API_PORT=8000
 API_MAX_MESSAGE_CHARS=20000
 IDEMPOTENCY_TTL_SECONDS=3600
 IDEMPOTENCY_MAX_ENTRIES=1000
+AUTH_MODE=oidc
+OIDC_ISSUER_URL=http://192.168.100.2:8080/realms/langgraph
+OIDC_AUDIENCE=langgraph-api
 DATABASE_URL=postgresql+asyncpg://langgraph:パスワード@192.168.100.2:5432/langgraph
 CHECKPOINT_DATABASE_URL=postgresql://langgraph:パスワード@192.168.100.2:5432/langgraph
 DATABASE_POOL_SIZE=5
@@ -181,7 +190,7 @@ uv run streamlit run src/web_app.py
 
 ### 3. Web・モバイル向けAPIを起動する
 
-PostgreSQLを用意し、`DATABASE_URL`と`CHECKPOINT_DATABASE_URL`を`.env`へ設定してから、アプリ所有テーブルを作成します。LangGraph所有テーブルはAPI初回起動時に安全に初期化されます。
+PostgreSQLとKeycloakを用意し、`.env`へデータベース設定とOIDC設定を追加してから、アプリ所有テーブルを作成します。LangGraph所有テーブルはAPI初回起動時に安全に初期化されます。Dockge向けKeycloak設定は[`deploy/keycloak/README.md`](deploy/keycloak/README.md)を参照してください。
 
 ```bash
 uv run alembic upgrade head
@@ -210,14 +219,18 @@ uv run uvicorn src.api.app:app --host 127.0.0.1 --port 8000
 会話を作成してメッセージを送る例：
 
 ```bash
-curl -X POST http://127.0.0.1:8000/v1/conversations
+curl -X POST http://127.0.0.1:8000/v1/conversations \
+  -H 'Authorization: Bearer アクセストークン'
 
 curl -X POST \
   http://127.0.0.1:8000/v1/conversations/会話ID/messages \
+  -H 'Authorization: Bearer アクセストークン' \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: 任意の一意なキー' \
   -d '{"content":"1+1を計算してください"}'
 ```
+
+`AUTH_MODE=oidc`では、最初の会話作成リクエストにも`Authorization: Bearer ...`が必要です。`AUTH_MODE=disabled`は既存CLI・Streamlitとのローカル開発互換専用であり、外部公開には使用しないでください。
 
 SSEでは `message.started`、`assistant.delta`、`tool.started`、
 `tool.completed`、`message.completed`、`message.failed` のイベントを返します。
@@ -225,8 +238,8 @@ SSEでは `message.started`、`assistant.delta`、`tool.started`、
 > [!NOTE]
 > PostgreSQL設定時は、会話、メモ、LangGraph履歴、実行履歴、冪等性がAPI再起動後も保持されます。
 > 同一会話の実行リースもPostgreSQLで共有されるため、複数APIプロセスから安全に利用できます。
-> フェーズ4の認証実装までは固定のローカルユーザーとして扱います。
-> インターネットへ公開する場合は、認証・認可、HTTPS、レート制限を追加してください。
+> OIDC有効時はJWTの`sub`を内部ユーザーへ対応付け、全会話・メモ操作で所有者を確認します。他ユーザーの会話IDを指定しても`404`を返します。
+> 現在のKeycloak ComposeはLAN内検証用です。インターネットへ公開する前にHTTPS、CORS、レート制限、ログマスキングを追加してください。
 
 ### SQLiteデータの移行
 
@@ -253,4 +266,4 @@ uv run python -m src.db.cleanup --limit 100
 uv run pytest
 ```
 
-現在は39件の自動テストを実行します。
+現在は43件の自動テストを実行します。

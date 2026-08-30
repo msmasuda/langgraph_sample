@@ -75,6 +75,36 @@ class DatabaseConversationStore:
             except IntegrityError:
                 await session.rollback()
 
+    async def get_or_create_user(
+        self,
+        external_subject: str,
+        *,
+        display_name: str | None = None,
+    ) -> uuid.UUID:
+        """Resolve an OIDC subject to one stable internal user ID."""
+        now = datetime.now(UTC)
+        candidate_id = uuid.uuid4()
+        statement = (
+            postgres_insert(User)
+            .values(
+                id=candidate_id,
+                external_subject=external_subject,
+                display_name=display_name,
+                created_at=now,
+                updated_at=now,
+            )
+            .on_conflict_do_nothing(index_elements=[User.external_subject])
+        )
+        async with self.sessions() as session:
+            await session.execute(statement)
+            await session.commit()
+            user_id = await session.scalar(
+                select(User.id).where(User.external_subject == external_subject)
+            )
+        if user_id is None:
+            raise RuntimeError("OIDCユーザーを作成できませんでした")
+        return user_id
+
     async def create(
         self,
         *,
