@@ -103,12 +103,15 @@ class AgentService:
             timeout_seconds=active_settings.agent_timeout_seconds,
         )
 
-    def _config(self, thread_id: str) -> RunnableConfig:
+    def _config(self, thread_id: str, user_id: str | None = None) -> RunnableConfig:
         normalized_thread_id = thread_id.strip()
         if not normalized_thread_id or len(normalized_thread_id) > 200:
             raise ValueError("有効なスレッドIDが必要です")
+        configurable = {"thread_id": normalized_thread_id}
+        if user_id is not None:
+            configurable["user_id"] = str(user_id)
         return {
-            "configurable": {"thread_id": normalized_thread_id},
+            "configurable": configurable,
             "recursion_limit": self.recursion_limit,
         }
 
@@ -183,7 +186,13 @@ class AgentService:
             return AgentConnectionError()
         return AgentExecutionError()
 
-    def stream_events(self, prompt: str, thread_id: str) -> Iterator[AgentEvent]:
+    def stream_events(
+        self,
+        prompt: str,
+        thread_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> Iterator[AgentEvent]:
         """Synchronously stream normalized events for compatibility clients."""
         inputs: AgentState = {"messages": [HumanMessage(content=prompt)]}
         deadline = time.monotonic() + self.timeout_seconds
@@ -192,7 +201,7 @@ class AgentService:
         try:
             for chunk in self.graph.stream(
                 inputs,
-                self._config(thread_id),
+                self._config(thread_id, user_id),
                 stream_mode="updates",
             ):
                 if time.monotonic() > deadline:
@@ -215,6 +224,7 @@ class AgentService:
         thread_id: str,
         *,
         include_tokens: bool = False,
+        user_id: str | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Asynchronously stream normalized events with an overall timeout."""
         inputs: AgentState = {"messages": [HumanMessage(content=prompt)]}
@@ -227,7 +237,7 @@ class AgentService:
             async with asyncio.timeout(self.timeout_seconds):
                 async for streamed in self.graph.astream(
                     inputs,
-                    self._config(thread_id),
+                    self._config(thread_id, user_id),
                     stream_mode=stream_mode,
                 ):
                     if include_tokens:
@@ -266,31 +276,52 @@ class AgentService:
                 raise
             raise converted from error
 
-    def invoke(self, prompt: str, thread_id: str) -> AgentRunResult:
+    def invoke(
+        self,
+        prompt: str,
+        thread_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> AgentRunResult:
         """Synchronously execute the agent and collect its events."""
-        events = tuple(self.stream_events(prompt, thread_id))
+        events = tuple(self.stream_events(prompt, thread_id, user_id=user_id))
         response = next(
             (event.content for event in reversed(events) if event.type == "assistant_completed"),
             "",
         )
         return AgentRunResult(response=response, events=events)
 
-    async def ainvoke(self, prompt: str, thread_id: str) -> AgentRunResult:
+    async def ainvoke(
+        self,
+        prompt: str,
+        thread_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> AgentRunResult:
         """Asynchronously execute the agent and collect its events."""
-        events = tuple([event async for event in self.astream_events(prompt, thread_id)])
+        events = tuple(
+            [
+                event
+                async for event in self.astream_events(
+                    prompt,
+                    thread_id,
+                    user_id=user_id,
+                )
+            ]
+        )
         response = next(
             (event.content for event in reversed(events) if event.type == "assistant_completed"),
             "",
         )
         return AgentRunResult(response=response, events=events)
 
-    def get_state(self, thread_id: str) -> Any:
+    def get_state(self, thread_id: str, *, user_id: str | None = None) -> Any:
         """Return the latest persisted state for a thread."""
-        return self.graph.get_state(self._config(thread_id))
+        return self.graph.get_state(self._config(thread_id, user_id))
 
-    async def aget_state(self, thread_id: str) -> Any:
+    async def aget_state(self, thread_id: str, *, user_id: str | None = None) -> Any:
         """Asynchronously return the latest persisted state for a thread."""
-        return await self.graph.aget_state(self._config(thread_id))
+        return await self.graph.aget_state(self._config(thread_id, user_id))
 
     async def adelete_thread(self, thread_id: str) -> None:
         """Delete all persisted checkpoints for a thread."""

@@ -62,7 +62,6 @@ async def database_lifespan(
             note_tools = create_database_note_tools(
                 conversation_store,
                 note_store,
-                user_id=settings.default_user_id,
             )
             agent_service = AgentService.create(
                 settings=settings,
