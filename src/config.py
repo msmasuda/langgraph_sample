@@ -47,6 +47,21 @@ class Settings(BaseSettings):
     oidc_http_timeout_seconds: float = Field(default=5.0, gt=0.0, le=30.0)
     oidc_clock_skew_seconds: int = Field(default=30, ge=0, le=300)
 
+    # API protection settings
+    cors_allowed_origins: str = ""
+    cors_allow_credentials: bool = True
+    cors_max_age_seconds: int = Field(default=600, ge=0, le=86_400)
+    rate_limit_enabled: bool = True
+    rate_limit_window_seconds: int = Field(default=60, ge=1, le=3_600)
+    rate_limit_ip_requests: int = Field(default=120, ge=1, le=100_000)
+    rate_limit_user_requests: int = Field(default=60, ge=1, le=100_000)
+    trusted_proxy_ips: str = ""
+    api_json_logging: bool = True
+    api_log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    approval_required_tools: str = (
+        "send_email,create_calendar_event,delete_file,execute_payment"
+    )
+
     # PostgreSQL settings (optional to preserve the local SQLite interfaces)
     database_url: str | None = None
     checkpoint_database_url: str | None = None
@@ -75,6 +90,25 @@ class Settings(BaseSettings):
         if not self.database_url:
             return None
         return self.database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+    @staticmethod
+    def _comma_separated(value: str) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(item.strip() for item in value.split(",") if item.strip()))
+
+    @property
+    def allowed_cors_origins(self) -> tuple[str, ...]:
+        """Return normalized browser origins from the environment setting."""
+        return self._comma_separated(self.cors_allowed_origins)
+
+    @property
+    def trusted_proxies(self) -> tuple[str, ...]:
+        """Return proxies whose forwarded client address may be trusted."""
+        return self._comma_separated(self.trusted_proxy_ips)
+
+    @property
+    def tools_requiring_approval(self) -> frozenset[str]:
+        """Return external side-effect tools requiring explicit approval."""
+        return frozenset(self._comma_separated(self.approval_required_tools))
 
 
 @lru_cache

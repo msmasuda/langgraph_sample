@@ -11,6 +11,7 @@ from src.db import (
     DatabaseIdempotencyStore,
     DatabaseManager,
     DatabaseNoteStore,
+    DatabaseRateLimiter,
     DatabaseRunStore,
     PostgresCheckpointManager,
     PostgresConversationExecutionRegistry,
@@ -82,6 +83,7 @@ async def database_lifespan(
                 ttl_seconds=settings.idempotency_ttl_seconds,
             )
             app.state.run_store = DatabaseRunStore(database.sessions)
+            app.state.rate_limiter = DatabaseRateLimiter(database.sessions)
             app.state.agent_service = agent_service
 
         yield
