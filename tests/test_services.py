@@ -7,7 +7,7 @@ from urllib.error import URLError
 
 import httpx
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 
 from src.errors import AgentConnectionError, AgentLimitError, AgentTimeoutError
 from src.services import AgentService, OllamaModelService
@@ -49,6 +49,42 @@ def test_agent_service_async_result():
 
     assert result.response == "完了しました。"
     assert result.events[-1].type == "assistant_completed"
+
+
+def test_agent_service_streams_token_events():
+    """Normalize LangGraph messages-mode chunks as assistant deltas."""
+
+    class TokenGraph:
+        async def astream(self, *_args, **_kwargs):
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(content="途中"),
+                    {"langgraph_node": "chatbot"},
+                ),
+            )
+            yield (
+                "updates",
+                {"chatbot": {"messages": [AIMessage(content="途中です。")]}},
+            )
+
+    async def run():
+        return [
+            event
+            async for event in make_service(TokenGraph()).astream_events(
+                "質問",
+                "thread-1",
+                include_tokens=True,
+            )
+        ]
+
+    events = asyncio.run(run())
+
+    assert [event.type for event in events] == [
+        "assistant_delta",
+        "assistant_completed",
+    ]
+    assert events[0].content == "途中"
 
 
 def test_agent_service_stops_before_excess_tool_execution():

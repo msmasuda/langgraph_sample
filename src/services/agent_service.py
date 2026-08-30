@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 import httpx
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -24,7 +24,12 @@ from src.errors import (
 )
 from src.state import AgentState
 
-AgentEventType = Literal["tool_started", "tool_completed", "assistant_completed"]
+AgentEventType = Literal[
+    "tool_started",
+    "tool_completed",
+    "assistant_delta",
+    "assistant_completed",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +156,24 @@ class AgentService:
                     )
 
     @staticmethod
+    def _content_text(content: Any) -> str:
+        """Normalize text and text content blocks emitted by chat models."""
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+
+    @staticmethod
     def _convert_error(error: Exception) -> AgentServiceError:
         if isinstance(error, AgentServiceError):
             return error
@@ -186,18 +209,51 @@ class AgentService:
                 raise
             raise converted from error
 
-    async def astream_events(self, prompt: str, thread_id: str) -> AsyncIterator[AgentEvent]:
+    async def astream_events(
+        self,
+        prompt: str,
+        thread_id: str,
+        *,
+        include_tokens: bool = False,
+    ) -> AsyncIterator[AgentEvent]:
         """Asynchronously stream normalized events with an overall timeout."""
         inputs: AgentState = {"messages": [HumanMessage(content=prompt)]}
         tool_call_count = 0
+        stream_mode: str | list[str] = (
+            ["messages", "updates"] if include_tokens else "updates"
+        )
 
         try:
             async with asyncio.timeout(self.timeout_seconds):
-                async for chunk in self.graph.astream(
+                async for streamed in self.graph.astream(
                     inputs,
                     self._config(thread_id),
-                    stream_mode="updates",
+                    stream_mode=stream_mode,
                 ):
+                    if include_tokens:
+                        mode, data = streamed
+                        if mode == "messages":
+                            message, metadata = data
+                            if isinstance(message, AIMessageChunk):
+                                content = self._content_text(message.content)
+                                if content:
+                                    node_name = (
+                                        str(metadata.get("langgraph_node", "chatbot"))
+                                        if isinstance(metadata, dict)
+                                        else "chatbot"
+                                    )
+                                    yield AgentEvent(
+                                        type="assistant_delta",
+                                        node_name=node_name,
+                                        content=content,
+                                    )
+                            continue
+                        if mode != "updates":
+                            continue
+                        chunk = data
+                    else:
+                        chunk = streamed
+
                     for event in self._events_from_chunk(chunk):
                         if event.type == "tool_started":
                             tool_call_count += 1

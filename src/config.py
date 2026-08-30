@@ -27,6 +27,13 @@ class Settings(BaseSettings):
     agent_timeout_seconds: float = Field(default=120.0, gt=0.0, le=1_800.0)
     ollama_request_timeout_seconds: float = Field(default=60.0, gt=0.0, le=600.0)
     ollama_health_timeout_seconds: float = Field(default=3.0, gt=0.0, le=30.0)
+
+    # API settings
+    api_host: str = "127.0.0.1"
+    api_port: int = Field(default=8000, ge=1, le=65_535)
+    api_max_message_chars: int = Field(default=20_000, ge=1, le=20_000)
+    idempotency_ttl_seconds: float = Field(default=3_600.0, gt=0.0, le=86_400.0)
+    idempotency_max_entries: int = Field(default=1_000, ge=1, le=100_000)
     system_prompt: str = (
         "あなたは親切で優秀なAIアシスタントです。\n"
         "ユーザーの質問やリクエストに対して、必要に応じて提供されたツール（Web検索、計算機、日時取得、メモ管理など）を活用して回答してください。\n"
