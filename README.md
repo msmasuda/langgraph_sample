@@ -84,6 +84,7 @@ langgraph_sample/
 │   │   └── model_service.py    # Ollama接続確認・モデル一覧取得
 │   ├── cli.py                  # 対話型Rich CLIアプリケーション
 │   ├── web_api_client.py       # Streamlit用FastAPI・SSEクライアント
+│   ├── web_conversation_ui.py  # 会話選択・表示名・自動タイトルの純粋ロジック
 │   └── web_app.py              # Streamlit Webチャットアプリケーション
 ├── tests/
 │   ├── __init__.py
@@ -94,6 +95,7 @@ langgraph_sample/
 │   ├── test_protection.py      # CORS・レート制限・ログ・承認ポリシーテスト
 │   ├── test_persistence.py     # DBリポジトリ・メモ・保存期限テスト
 │   ├── test_web_api_client.py  # Streamlit用APIクライアントテスト
+│   ├── test_web_conversation_ui.py # Streamlit会話選択ロジックテスト
 │   ├── test_web_app.py         # Streamlit画面スモークテスト
 │   └── test_services.py        # 共通サービス、実行上限、Ollama状態テスト
 └── data/                       # 会話履歴・メモのSQLite保存先 (自動生成、Git対象外)
@@ -213,6 +215,9 @@ uv run streamlit run src/web_app.py
 ブラウザで `http://localhost:8501` にアクセスします。
 - Keycloakログイン状態とAPI・Ollama・PostgreSQLの稼働状態を確認できます。
 - 会話の新規作成、一覧選択、名前変更、アーカイブ・再開、削除に対応します。
+- 会話選択では会話名・更新日時・短縮IDを表示し、同名会話を区別できます。
+- 会話IDはURL指定を優先し、選択変更時もURLと同期します。最初の質問から会話名を自動設定します。
+- 会話がない場合は空会話を自動作成せず、「新しい会話」を押したときだけ作成します。
 - SSEで回答を逐次表示し、送信ボタンが停止ボタンへ切り替わります。停止時はAPIにもキャンセルを通知します。
 - 会話IDはURLに保持され、ブラウザ再読み込み後もAPIから履歴を復元します。
 - ツール実行は名前と状態だけを表示し、引数や実行出力は画面へ表示しません。
@@ -301,4 +306,4 @@ uv run python -m src.db.cleanup --limit 100
 uv run pytest
 ```
 
-現在は61件の自動テストを実行します。
+現在は67件の自動テストを実行します。

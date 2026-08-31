@@ -10,6 +10,12 @@ import streamlit as st
 
 from src.config import get_settings
 from src.web_api_client import AgentApiClient, AgentApiError
+from src.web_conversation_ui import (
+    DEFAULT_CONVERSATION_TITLE,
+    conversation_option_label,
+    resolve_conversation_id,
+    title_from_prompt,
+)
 
 st.set_page_config(
     page_title="LangGraph Ollama Agent",
@@ -73,6 +79,13 @@ def show_api_error(error: AgentApiError) -> None:
 def set_next_conversation(conversation_id: str | None) -> None:
     """Select a conversation before the selector widget is created."""
     st.session_state.next_conversation_id = conversation_id
+
+
+def sync_conversation_query() -> None:
+    """Keep the URL aligned with an explicit selector change."""
+    selected = st.session_state.get("conversation_selector")
+    if isinstance(selected, str) and selected:
+        st.query_params["conversation"] = selected
 
 
 st.title("LangGraph + Ollama エージェント")
@@ -174,22 +187,18 @@ if query_conversation and all(str(item.id) != query_conversation for item in con
     except AgentApiError:
         query_conversation = None
 
-if not conversations:
-    try:
-        conversations.append(client.create_conversation())
-    except AgentApiError as error:
-        show_api_error(error)
-        st.stop()
-
 conversation_by_id = {str(item.id): item for item in conversations}
 conversation_ids = list(conversation_by_id)
 
 next_conversation = st.session_state.pop("next_conversation_id", None)
-if next_conversation in conversation_by_id:
-    st.session_state.conversation_selector = next_conversation
-elif st.session_state.get("conversation_selector") not in conversation_by_id:
-    desired = query_conversation if query_conversation in conversation_by_id else None
-    st.session_state.conversation_selector = desired or conversation_ids[0]
+selected_conversation_id = resolve_conversation_id(
+    conversation_ids,
+    next_id=next_conversation,
+    query_id=query_conversation,
+    current_id=st.session_state.get("conversation_selector"),
+)
+if selected_conversation_id is not None:
+    st.session_state.conversation_selector = selected_conversation_id
 
 with st.sidebar:
     st.divider()
@@ -203,74 +212,81 @@ with st.sidebar:
         except AgentApiError as error:
             show_api_error(error)
 
-    selected_conversation_id = st.selectbox(
-        "会話を選択",
-        conversation_ids,
-        format_func=lambda item_id: conversation_by_id[item_id].title,
-        key="conversation_selector",
-    )
-    selected_conversation = conversation_by_id[selected_conversation_id]
-    if st.query_params.get("conversation") != selected_conversation_id:
-        st.query_params["conversation"] = selected_conversation_id
-
-    with st.expander("会話を管理"):
-        with st.form(f"rename-{selected_conversation_id}", border=False):
-            renamed_title = st.text_input(
-                "会話名",
-                value=selected_conversation.title,
-                max_chars=200,
-            )
-            rename_submitted = st.form_submit_button(
-                "名前を変更",
-                icon=":material/edit:",
-            )
-        if rename_submitted:
-            try:
-                client.update_conversation(
-                    selected_conversation_id,
-                    title=renamed_title,
-                )
-                st.rerun()
-            except AgentApiError as error:
-                show_api_error(error)
-
-        confirm_delete = st.checkbox(
-            "この会話を削除することを確認",
-            key=f"confirm-delete-{selected_conversation_id}",
+    if not conversations:
+        st.caption("保存されている会話はありません。")
+    else:
+        selected_conversation_id = st.selectbox(
+            "会話を選択",
+            conversation_ids,
+            format_func=lambda item_id: conversation_option_label(
+                conversation_by_id[item_id]
+            ),
+            key="conversation_selector",
+            on_change=sync_conversation_query,
         )
-        if st.button(
-            "会話を削除",
-            icon=":material/delete:",
-            disabled=not confirm_delete,
-            width="stretch",
-        ):
-            try:
-                client.delete_conversation(selected_conversation_id)
-                set_next_conversation(None)
-                st.query_params.pop("conversation", None)
-                st.rerun()
-            except AgentApiError as error:
-                show_api_error(error)
+        selected_conversation = conversation_by_id[selected_conversation_id]
+        if st.query_params.get("conversation") != selected_conversation_id:
+            st.query_params["conversation"] = selected_conversation_id
 
-        if selected_conversation.status == "archived":
-            if st.button("会話を再開", icon=":material/unarchive:"):
+    if conversations:
+        with st.expander("会話を管理"):
+            with st.form(f"rename-{selected_conversation_id}", border=False):
+                renamed_title = st.text_input(
+                    "会話名",
+                    value=selected_conversation.title,
+                    max_chars=200,
+                )
+                rename_submitted = st.form_submit_button(
+                    "名前を変更",
+                    icon=":material/edit:",
+                )
+            if rename_submitted:
                 try:
                     client.update_conversation(
                         selected_conversation_id,
-                        status="active",
+                        title=renamed_title,
                     )
                     st.rerun()
                 except AgentApiError as error:
                     show_api_error(error)
-        elif st.button("会話をアーカイブ", icon=":material/archive:"):
-            try:
-                client.update_conversation(
-                    selected_conversation_id,
-                    status="archived",
-                )
-                st.rerun()
-            except AgentApiError as error:
-                show_api_error(error)
+
+            confirm_delete = st.checkbox(
+                "この会話を削除することを確認",
+                key=f"confirm-delete-{selected_conversation_id}",
+            )
+            if st.button(
+                "会話を削除",
+                icon=":material/delete:",
+                disabled=not confirm_delete,
+                width="stretch",
+            ):
+                try:
+                    client.delete_conversation(selected_conversation_id)
+                    set_next_conversation(None)
+                    st.query_params.pop("conversation", None)
+                    st.rerun()
+                except AgentApiError as error:
+                    show_api_error(error)
+
+            if selected_conversation.status == "archived":
+                if st.button("会話を再開", icon=":material/unarchive:"):
+                    try:
+                        client.update_conversation(
+                            selected_conversation_id,
+                            status="active",
+                        )
+                        st.rerun()
+                    except AgentApiError as error:
+                        show_api_error(error)
+            elif st.button("会話をアーカイブ", icon=":material/archive:"):
+                try:
+                    client.update_conversation(
+                        selected_conversation_id,
+                        status="archived",
+                    )
+                    st.rerun()
+                except AgentApiError as error:
+                    show_api_error(error)
 
     model_expander = st.expander(
         "利用可能なモデル",
@@ -289,22 +305,27 @@ with st.sidebar:
             except AgentApiError as error:
                 st.caption(error.user_message)
 
-    notes_expander = st.expander(
-        "保存されたメモ",
-        key=f"saved-notes-{selected_conversation_id}",
-        on_change="rerun",
-    )
-    if notes_expander.open:
-        with notes_expander:
-            try:
-                notes = client.list_notes(selected_conversation_id)
-                if not notes.items:
-                    st.caption("保存されているメモはありません。")
-                for note in notes.items:
-                    st.markdown(f"**{note.title}**")
-                    st.write(note.content)
-            except AgentApiError as error:
-                st.caption(error.user_message)
+    if conversations:
+        notes_expander = st.expander(
+            "保存されたメモ",
+            key=f"saved-notes-{selected_conversation_id}",
+            on_change="rerun",
+        )
+        if notes_expander.open:
+            with notes_expander:
+                try:
+                    notes = client.list_notes(selected_conversation_id)
+                    if not notes.items:
+                        st.caption("保存されているメモはありません。")
+                    for note in notes.items:
+                        st.markdown(f"**{note.title}**")
+                        st.write(note.content)
+                except AgentApiError as error:
+                    st.caption(error.user_message)
+
+if not conversations:
+    st.info("会話がありません。サイドバーの「新しい会話」から開始してください。")
+    st.stop()
 
 st.subheader(selected_conversation.title)
 st.caption(
@@ -348,6 +369,21 @@ prompt = st.chat_input(
 )
 
 if prompt:
+    if (
+        selected_conversation.title == DEFAULT_CONVERSATION_TITLE
+        and not history.items
+    ):
+        try:
+            client.update_conversation(
+                selected_conversation_id,
+                title=title_from_prompt(prompt),
+            )
+        except AgentApiError:
+            st.toast(
+                "会話名を自動設定できませんでした。会話はそのまま続行します。",
+                icon=":material/info:",
+            )
+
     idempotency_key = str(uuid.uuid4())
     st.session_state.pending_message = {
         "conversation_id": selected_conversation_id,
