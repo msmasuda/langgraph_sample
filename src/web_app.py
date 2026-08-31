@@ -414,7 +414,10 @@ if prompt:
         "idempotency_key": idempotency_key,
     }
     message_input_slot.empty()
-    with message_input_slot.container(
+    # Keep the stop control outside the cleared form placeholder. Reusing the
+    # form's placeholder here can leave the replacement container invisible
+    # while the streaming request is still running.
+    with st.container(
         horizontal=True,
         horizontal_alignment="right",
         vertical_alignment="center",
