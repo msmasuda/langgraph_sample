@@ -382,6 +382,34 @@ async def test_sse_agent_error_emits_failed_event_and_releases_lock():
 
 
 @pytest.mark.asyncio
+async def test_sse_emits_heartbeat_while_waiting_for_agent_event():
+    class SlowStreamAgent(StubAgentService):
+        async def astream_events(self, *_args, **_kwargs):
+            await asyncio.sleep(0.6)
+            yield AgentEvent(
+                type="assistant_completed",
+                node_name="chatbot",
+                content="回答",
+            )
+
+    app = make_test_app(agent_service=SlowStreamAgent())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as client:
+        conversation_id = await create_conversation(client)
+        response = await client.post(
+            f"/v1/conversations/{conversation_id}/messages/stream",
+            json={"content": "質問"},
+        )
+
+    assert response.status_code == 200
+    assert ": stream-heartbeat" in response.text
+    assert "event: message.completed" in response.text
+
+
+@pytest.mark.asyncio
 async def test_same_conversation_rejects_overlapping_messages():
     class BlockingAgent(StubAgentService):
         def __init__(self) -> None:
@@ -610,4 +638,46 @@ async def test_cancel_endpoint_stops_non_streaming_agent_run():
     assert cancelled.json()["status"] == "cancellation_requested"
     assert message_response.status_code == 409
     assert message_response.json()["error"]["code"] == "message_cancelled"
+    assert agent.cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_cancel_endpoint_stops_streaming_agent_run():
+    class CancellableStreamAgent(StubAgentService):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+
+        async def astream_events(self, *_args, **_kwargs):
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled.set()
+            yield  # pragma: no cover
+
+    agent = CancellableStreamAgent()
+    app = make_test_app(agent_service=agent)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as client:
+        conversation_id = await create_conversation(client)
+        message_task = asyncio.create_task(
+            client.post(
+                f"/v1/conversations/{conversation_id}/messages/stream",
+                json={"content": "長い処理"},
+            )
+        )
+        await asyncio.wait_for(agent.started.wait(), timeout=1)
+        cancelled = await client.post(
+            f"/v1/conversations/{conversation_id}/cancel"
+        )
+        message_response = await asyncio.wait_for(message_task, timeout=1)
+
+    assert cancelled.json()["status"] == "cancellation_requested"
+    assert "event: message.failed" in message_response.text
+    assert '"code":"message_cancelled"' in message_response.text
     assert agent.cancelled.is_set()

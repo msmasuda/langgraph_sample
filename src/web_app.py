@@ -360,13 +360,37 @@ is_archived = selected_conversation.status == "archived"
 if is_archived:
     st.info("この会話はアーカイブされています。再開するとメッセージを送信できます。")
 
-prompt = st.chat_input(
-    "質問や指示を入力してください",
-    key="chat_prompt",
-    max_chars=settings.api_max_message_chars,
-    disabled=is_archived,
-    submit_mode="stop",
-)
+message_input_slot = st.empty()
+with message_input_slot.form(
+    f"message-form-{selected_conversation_id}",
+    clear_on_submit=True,
+    enter_to_submit=True,
+    border=False,
+):
+    with st.container(horizontal=True, vertical_alignment="bottom"):
+        prompt_draft = st.text_area(
+            "質問や指示",
+            key=f"message-draft-{selected_conversation_id}",
+            placeholder="質問や指示を入力してください",
+            max_chars=settings.api_max_message_chars,
+            height=88,
+            disabled=is_archived,
+            label_visibility="collapsed",
+        )
+        prompt_submitted = st.form_submit_button(
+            "送信",
+            type="primary",
+            icon=":material/send:",
+            disabled=is_archived,
+            width="content",
+        )
+    st.caption(
+        "EnterはIME確定・改行に使用します。送信はボタンまたはCtrl／Command+Enterです。"
+    )
+
+prompt = prompt_draft.strip() if prompt_submitted else ""
+if prompt_submitted and not prompt:
+    st.warning("送信するメッセージを入力してください。")
 
 if prompt:
     if (
@@ -389,6 +413,20 @@ if prompt:
         "conversation_id": selected_conversation_id,
         "idempotency_key": idempotency_key,
     }
+    message_input_slot.empty()
+    with message_input_slot.container(
+        horizontal=True,
+        horizontal_alignment="right",
+        vertical_alignment="center",
+    ):
+        st.caption("回答を生成しています。停止すると途中までの回答は保存されません。")
+        st.button(
+            "回答生成を停止",
+            key=f"stop-response-{idempotency_key}",
+            type="primary",
+            icon=":material/stop_circle:",
+            help="生成処理を中止し、FastAPIへキャンセルを通知します。",
+        )
     with st.chat_message("user"):
         st.markdown(prompt)
 
@@ -418,6 +456,12 @@ if prompt:
                         content = event.data.get("content")
                         if isinstance(content, str):
                             final_response = content
+                    elif event.event == "stream.heartbeat":
+                        execution_status.update(
+                            label="回答を生成しています",
+                            state="running",
+                            expanded=True,
+                        )
                     elif event.event == "message.failed":
                         raise AgentApiError(
                             str(
