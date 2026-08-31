@@ -218,7 +218,8 @@ uv run streamlit run src/web_app.py
 - 会話選択では会話名・更新日時・短縮IDを表示し、同名会話を区別できます。
 - 会話IDはURL指定を優先し、選択変更時もURLと同期します。最初の質問から会話名を自動設定します。
 - 会話がない場合は空会話を自動作成せず、「新しい会話」を押したときだけ作成します。
-- SSEで回答を逐次表示し、送信ボタンが停止ボタンへ切り替わります。停止時はAPIにもキャンセルを通知します。
+- IME確定のEnterでは送信せず、右側の送信ボタンまたはCtrl／Command+Enterで送信します。
+- 回答生成中は専用の停止ボタンを表示し、SSEハートビートを利用してAPIにも速やかにキャンセルを通知します。
 - 会話IDはURLに保持され、ブラウザ再読み込み後もAPIから履歴を復元します。
 - ツール実行は名前と状態だけを表示し、引数や実行出力は画面へ表示しません。
 - 利用モデルとTemperatureはAPIサーバー側の`.env`で管理します。
@@ -271,6 +272,8 @@ curl -X POST \
 
 SSEでは `message.started`、`assistant.delta`、`tool.started`、
 `tool.completed`、`message.completed`、`message.failed` のイベントを返します。
+処理待ちの間は `: stream-heartbeat` コメントを送信します。一般的なSSEクライアントは
+このコメントを無視でき、Streamlitは停止操作を受け付けるために利用します。
 
 > [!NOTE]
 > PostgreSQL設定時は、会話、メモ、LangGraph履歴、実行履歴、冪等性がAPI再起動後も保持されます。
@@ -306,4 +309,4 @@ uv run python -m src.db.cleanup --limit 100
 uv run pytest
 ```
 
-現在は67件の自動テストを実行します。
+現在は71件の自動テストを実行します。

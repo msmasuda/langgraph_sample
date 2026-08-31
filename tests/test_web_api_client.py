@@ -130,6 +130,14 @@ def test_parse_sse_lines_supports_comments_and_multiline_json():
     assert events[0].data["delta"] == "回答"
 
 
+def test_parse_sse_lines_exposes_stream_heartbeat_for_ui_cancellation():
+    events = list(parse_sse_lines([": stream-heartbeat", ""]))
+
+    assert len(events) == 1
+    assert events[0].event == "stream.heartbeat"
+    assert events[0].data == {}
+
+
 def test_stream_message_sends_idempotency_key_and_decodes_events():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["Idempotency-Key"] == "message-key"

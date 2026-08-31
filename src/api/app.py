@@ -546,13 +546,14 @@ def create_app(
         thread_id: str,
         user_id: uuid.UUID,
         request: Request,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncIterator[AgentEvent | None]:
         iterator = app.state.agent_service.astream_events(
             prompt,
             thread_id,
             include_tokens=True,
             user_id=str(user_id),
         ).__aiter__()
+        heartbeat_at = time.monotonic()
         try:
             while True:
                 next_event = asyncio.create_task(anext(iterator))
@@ -568,6 +569,10 @@ def create_app(
                         next_event.cancel()
                         await asyncio.gather(next_event, return_exceptions=True)
                         raise RunCancelled()
+                    now = time.monotonic()
+                    if now - heartbeat_at >= 0.5:
+                        heartbeat_at = now
+                        yield None
                 try:
                     yield await next_event
                 except StopAsyncIteration:
@@ -962,6 +967,9 @@ def create_app(
                     user_id,
                     request,
                 ):
+                    if event is None:
+                        yield ": stream-heartbeat\n\n"
+                        continue
                     observed_events.append(event)
                     if event.type == "assistant_delta":
                         delta_content.append(event.content)

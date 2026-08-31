@@ -87,6 +87,9 @@ def parse_sse_lines(lines: Iterable[str]) -> Iterator[ServerSentEvent]:
 
     for raw_line in lines:
         line = raw_line.rstrip("\r\n")
+        if line == ": stream-heartbeat" and not data_lines:
+            yield ServerSentEvent("stream.heartbeat", {})
+            continue
         if not line:
             decoded = decode_event()
             if decoded is not None:
