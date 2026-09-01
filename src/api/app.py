@@ -553,12 +553,20 @@ def create_app(
             include_tokens=True,
             user_id=str(user_id),
         ).__aiter__()
+        deadline = time.monotonic() + active_settings.agent_timeout_seconds
         heartbeat_at = time.monotonic()
         try:
             while True:
+                if time.monotonic() >= deadline:
+                    raise AgentTimeoutError()
                 next_event = asyncio.create_task(anext(iterator))
                 while not next_event.done():
-                    await asyncio.wait({next_event}, timeout=0.25)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        next_event.cancel()
+                        await asyncio.gather(next_event, return_exceptions=True)
+                        raise AgentTimeoutError()
+                    await asyncio.wait({next_event}, timeout=min(0.25, remaining))
                     if await request.is_disconnected():
                         next_event.cancel()
                         await asyncio.gather(next_event, return_exceptions=True)

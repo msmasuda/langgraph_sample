@@ -410,6 +410,54 @@ async def test_sse_emits_heartbeat_while_waiting_for_agent_event():
 
 
 @pytest.mark.asyncio
+async def test_sse_overall_timeout_applies_while_partial_events_continue():
+    class EndlessPartialStreamAgent(StubAgentService):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cancelled = asyncio.Event()
+
+        async def astream_events(self, *_args, **_kwargs):
+            try:
+                while True:
+                    yield AgentEvent(
+                        type="assistant_delta",
+                        node_name="chatbot",
+                        content="途中",
+                    )
+                    await asyncio.sleep(0.01)
+            finally:
+                self.cancelled.set()
+
+    agent = EndlessPartialStreamAgent()
+    registry = ConversationExecutionRegistry()
+    app = make_test_app(
+        agent_service=agent,
+        execution_registry=registry,
+        settings_overrides={"agent_timeout_seconds": 0.05},
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as client:
+        conversation_id = await create_conversation(client)
+        response = await asyncio.wait_for(
+            client.post(
+                f"/v1/conversations/{conversation_id}/messages/stream",
+                json={"content": "長い回答"},
+            ),
+            timeout=1,
+        )
+
+    assert response.status_code == 200
+    assert "event: assistant.delta" in response.text
+    assert "event: message.failed" in response.text
+    assert '"code":"agent_timeout"' in response.text
+    assert agent.cancelled.is_set()
+    assert await registry.reserve(uuid.UUID(conversation_id)) is True
+
+
+@pytest.mark.asyncio
 async def test_same_conversation_rejects_overlapping_messages():
     class BlockingAgent(StubAgentService):
         def __init__(self) -> None:
