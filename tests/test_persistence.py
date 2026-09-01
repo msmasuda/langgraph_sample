@@ -1,9 +1,11 @@
 """Tests for phase 3 persistence services."""
 
 import uuid
+from unittest.mock import patch
 
 import pytest
 
+from src.db.checkpoint import PostgresCheckpointManager
 from src.db.models import Base
 from src.db.repositories import DatabaseConversationStore, DatabaseNoteStore
 from src.db.session import DatabaseManager
@@ -15,6 +17,23 @@ from src.services import (
 )
 from src.services.note_tools import create_database_note_tools
 from src.services.retention_service import cleanup_expired_conversations
+
+
+def test_checkpoint_pool_checks_connection_before_checkout():
+    with (
+        patch("src.db.checkpoint.AsyncConnectionPool") as pool_type,
+        patch("src.db.checkpoint.AsyncPostgresSaver"),
+    ):
+        manager = PostgresCheckpointManager(
+            "postgresql://user:password@database.example/app",
+            pool_size=3,
+            connect_timeout_seconds=4,
+        )
+
+    assert manager.pool is pool_type.return_value
+    assert pool_type.call_args.kwargs["check"] is pool_type.check_connection
+    assert pool_type.call_args.kwargs["max_size"] == 3
+    assert pool_type.call_args.kwargs["timeout"] == 4
 
 
 @pytest.mark.asyncio

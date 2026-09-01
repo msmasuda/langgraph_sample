@@ -19,6 +19,7 @@ Web検索、計算機、システム日時取得、メモ管理などのツー�
 - **Web・モバイル向けAPI**:
   - FastAPIによる会話作成、通常応答、Server-Sent Events（SSE）ストリーミングを提供。
   - PostgreSQLによる会話・メモ・実行履歴・冪等性の永続化と複数APIプロセス間の同時実行制御に対応。
+  - LangGraphチェックポイント用接続は貸出前に生存確認し、長時間アイドルで切断された接続を自動交換。
   - 会話一覧・更新・削除・履歴・キャンセル、メモCRUD、リクエストID、安全なエラー応答を提供。
   - Keycloak/OIDCのRS256アクセストークンを検証し、JWTの`sub`ごとに会話・メモを分離。
   - WEB・モバイルはAuthorization Code + PKCEでログイン可能。`/health`・`/ready`以外のAPIをBearer認証で保護。
@@ -310,4 +311,4 @@ uv run python -m src.db.cleanup --limit 100
 uv run pytest
 ```
 
-現在は73件の自動テストを実行します。
+現在は74件の自動テストを実行します。
