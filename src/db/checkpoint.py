@@ -27,6 +27,7 @@ class PostgresCheckpointManager:
             max_size=pool_size,
             open=False,
             timeout=connect_timeout_seconds,
+            check=AsyncConnectionPool.check_connection,
         )
         serializer = JsonPlusSerializer(allowed_msgpack_modules=None)
         self.checkpointer = AsyncPostgresSaver(self.pool, serde=serializer)
