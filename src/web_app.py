@@ -360,6 +360,18 @@ is_archived = selected_conversation.status == "archived"
 if is_archived:
     st.info("この会話はアーカイブされています。再開するとメッセージを送信できます。")
 
+stream_error = st.session_state.pop("stream_error", None)
+if isinstance(stream_error, dict) and stream_error.get("message"):
+    show_api_error(
+        AgentApiError(
+            str(stream_error["message"]),
+            code=str(stream_error.get("code") or "message_failed"),
+            status_code=stream_error.get("status_code"),
+            request_id=stream_error.get("request_id"),
+            retry_after=stream_error.get("retry_after"),
+        )
+    )
+
 message_input_slot = st.empty()
 with message_input_slot.form(
     f"message-form-{selected_conversation_id}",
@@ -490,9 +502,11 @@ if prompt:
                 st.rerun()
             except AgentApiError as error:
                 st.session_state.pop("pending_message", None)
-                execution_status.update(
-                    label="回答を生成できませんでした",
-                    state="error",
-                    expanded=True,
-                )
-                show_api_error(error)
+                st.session_state.stream_error = {
+                    "message": error.user_message,
+                    "code": error.code,
+                    "status_code": error.status_code,
+                    "request_id": error.request_id,
+                    "retry_after": error.retry_after,
+                }
+                st.rerun()
