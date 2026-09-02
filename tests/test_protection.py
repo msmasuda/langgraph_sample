@@ -118,6 +118,10 @@ def test_json_logging_redacts_secrets_and_free_form_content():
         "clientSecret": "another-secret",
         "email": "user@example.com",
         "tool_args": {"recipient": "target@example.com"},
+        "image": "base64-private-image",
+        "images": ["another-private-image"],
+        "prompt": "private user prompt",
+        "content": "private model output",
         "nested": {"password": "secret-password", "status": "ok"},
     }
     record = logging.LogRecord(
@@ -139,6 +143,10 @@ def test_json_logging_redacts_secrets_and_free_form_content():
     assert "visible-token" not in payload
     assert "target@example.com" not in payload
     assert "user@example.com" not in payload
+    assert "base64-private-image" not in payload
+    assert "another-private-image" not in payload
+    assert "private user prompt" not in payload
+    assert "private model output" not in payload
     assert decoded["authorization"] == "[REDACTED]"
     assert decoded["clientSecret"] == "[REDACTED]"
     assert decoded["tool_args"] == "[REDACTED]"

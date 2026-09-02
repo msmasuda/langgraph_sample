@@ -25,6 +25,10 @@ Web検索、計算機、システム日時取得、メモ管理などのツー�
   - WEB・モバイルはAuthorization Code + PKCEでログイン可能。`/health`・`/ready`以外のAPIをBearer認証で保護。
   - 許可Origin限定CORS、IP・ユーザー単位の共有レート制限、機密情報を記録しないJSONアクセスログに対応。
   - 外部副作用ツールは承認実行基盤へ接続されるまで登録を拒否する、フェイルクローズのツールポリシーを提供。
+- **汎用画像解析API**:
+  - JPEG・PNG・WebPと任意プロンプトを、会話履歴から独立した画像対応Ollamaモデルで解析。
+  - 任意の制限付きJSON SchemaによるStructured Outputs、モデル能力確認、実出力の再検証に対応。
+  - MIME偽装・破損・過大画像を拒否し、EXIF除去、専用レート制限、画像・プロンプトを保存しない処理を提供。
 - **Ollama状態確認**:
   - Ollamaへの接続状態とインストール済みモデルを取得し、Web UIへ表示。
 - **充実のツールセット**:
@@ -55,6 +59,8 @@ langgraph_sample/
 │   ├── postgres/compose.yaml   # PostgreSQL用Docker Compose例
 │   └── keycloak/               # Dockge向けKeycloak・Realm設定
 ├── README.md                   # 本ドキュメント
+├── docs/
+│   └── vision-api.md           # 汎用画像解析API設計・利用ガイド
 ├── src/
 │   ├── __init__.py
 │   ├── config.py               # 設定管理 (Pydantic Settings)
@@ -69,6 +75,7 @@ langgraph_sample/
 │   │   ├── protection.py       # CORS補助・レート制限ヘッダー・安全なJSONログ
 │   │   ├── runtime.py          # PostgreSQL・チェックポインタのライフサイクル
 │   │   ├── schemas.py          # API入出力スキーマ
+│   │   ├── vision.py           # multipart画像の上限読込・確実な削除
 │   │   └── sse.py              # SSEイベントエンコード
 │   ├── db/
 │   │   ├── models.py           # SQLAlchemyデータモデル
@@ -82,7 +89,8 @@ langgraph_sample/
 │   │   ├── note_tools.py       # PostgreSQL対応メモツール
 │   │   ├── retention_service.py # 保存期限クリーンアップ
 │   │   ├── rate_limit.py       # 固定窓レート制限の共通型・ローカル実装
-│   │   └── model_service.py    # Ollama接続確認・モデル一覧取得
+│   │   ├── model_service.py    # Ollama接続確認・モデル一覧取得
+│   │   └── vision_service.py   # 画像・スキーマ検証、Ollama画像解析
 │   ├── cli.py                  # 対話型Rich CLIアプリケーション
 │   ├── web_api_client.py       # Streamlit用FastAPI・SSEクライアント
 │   ├── web_conversation_ui.py  # 会話選択・表示名・自動タイトルの純粋ロジック
@@ -92,6 +100,8 @@ langgraph_sample/
 │   ├── test_tools.py           # ツール群の単体テスト
 │   ├── test_agent.py           # 同期・非同期グラフ構築・動作テスト
 │   ├── test_api.py             # HTTP API、SSE、冪等性・同時実行テスト
+│   ├── test_vision_api.py      # 画像アップロード一時領域の削除テスト
+│   ├── test_vision_service.py  # 画像・Schema・Ollama異常系テスト
 │   ├── test_auth.py            # JWT検証・認証必須・ユーザー分離テスト
 │   ├── test_protection.py      # CORS・レート制限・ログ・承認ポリシーテスト
 │   ├── test_persistence.py     # DBリポジトリ・メモ・保存期限テスト
@@ -147,6 +157,26 @@ MAX_TOOL_CALLS=8
 AGENT_TIMEOUT_SECONDS=120
 OLLAMA_REQUEST_TIMEOUT_SECONDS=60
 OLLAMA_HEALTH_TIMEOUT_SECONDS=3
+VISION_MODEL=qwen3.5:9b-mlx
+VISION_ALLOWED_MODELS=
+VISION_TIMEOUT_SECONDS=120
+VISION_THINK=false
+VISION_KEEP_ALIVE=30m
+VISION_MAX_IMAGE_BYTES=10485760
+VISION_ALLOWED_MIME_TYPES=image/jpeg,image/png,image/webp
+VISION_MAX_PROMPT_CHARS=5000
+VISION_MAX_SCHEMA_BYTES=16384
+VISION_MAX_RESPONSE_BYTES=1048576
+VISION_MAX_IMAGE_WIDTH=8192
+VISION_MAX_IMAGE_HEIGHT=8192
+VISION_MAX_IMAGE_PIXELS=25000000
+VISION_MAX_MODEL_IMAGE_EDGE=1280
+VISION_MAX_SCHEMA_DEPTH=8
+VISION_MAX_SCHEMA_PROPERTIES=100
+VISION_MAX_ARRAY_ITEMS=100
+VISION_MAX_OUTPUT_STRING_CHARS=10000
+VISION_RATE_LIMIT_REQUESTS=10
+VISION_RATE_LIMIT_WINDOW_SECONDS=60
 API_HOST=127.0.0.1
 API_PORT=8000
 API_MAX_MESSAGE_CHARS=20000
@@ -246,6 +276,7 @@ uv run uvicorn src.api.app:app --host 127.0.0.1 --port 8000
 - 稼働確認: `GET /health`
 - Ollamaを含む準備状態: `GET /ready`
 - 利用可能モデル: `GET /v1/models`
+- 汎用画像解析: `POST /v1/vision/analyze`
 - 会話作成: `POST /v1/conversations`
 - 会話一覧: `GET /v1/conversations`
 - 会話詳細・更新・削除: `GET/PATCH/DELETE /v1/conversations/{conversation_id}`
@@ -271,6 +302,8 @@ curl -X POST \
 ```
 
 `AUTH_MODE=oidc`では、最初の会話作成リクエストにも`Authorization: Bearer ...`が必要です。StreamlitはKeycloakから取得したアクセストークンをサーバー側API呼び出しだけに使用します。`AUTH_MODE=disabled`はローカル開発互換専用であり、外部公開には使用しないでください。
+
+画像解析APIのモデル準備、multipartリクエスト、JSON Schema、モバイル実装、エラー、保存・ログ方針は[`docs/vision-api.md`](docs/vision-api.md)を参照してください。
 
 SSEでは `message.started`、`assistant.delta`、`tool.started`、
 `tool.completed`、`message.completed`、`message.failed` のイベントを返します。
@@ -311,4 +344,4 @@ uv run python -m src.db.cleanup --limit 100
 uv run pytest
 ```
 
-現在は74件の自動テストを実行します。
+現在は104件の自動テストを実行します。

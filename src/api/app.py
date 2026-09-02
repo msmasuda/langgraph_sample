@@ -8,8 +8,22 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, Header, Query, Request, Response, Security, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    Query,
+    Request,
+    Response,
+    Security,
+    UploadFile,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -46,8 +60,10 @@ from src.api.schemas import (
     NoteUpdateRequest,
     ReadyResponse,
     ToolExecutionResponse,
+    VisionAnalyzeResponse,
 )
 from src.api.sse import encode_sse
+from src.api.vision import read_image_upload
 from src.config import Settings, get_settings
 from src.errors import (
     AgentConnectionError,
@@ -55,6 +71,7 @@ from src.errors import (
     AgentLimitError,
     AgentServiceError,
     AgentTimeoutError,
+    VisionServiceError,
 )
 from src.services import (
     AgentEvent,
@@ -65,6 +82,7 @@ from src.services import (
     InMemoryConversationStore,
     InMemoryNoteStore,
     OllamaModelService,
+    VisionService,
 )
 from src.services.rate_limit import InMemoryRateLimiter
 from src.tool_policy import ToolApprovalPolicy
@@ -235,6 +253,7 @@ def create_app(
     idempotency_store: Any | None = None,
     run_store: Any | None = None,
     authenticator: Any | None = None,
+    vision_service: Any | None = None,
     use_database: bool | None = None,
 ) -> FastAPI:
     """Create an API application with replaceable services for tests."""
@@ -248,7 +267,7 @@ def create_app(
     )
     app = FastAPI(
         title="LangGraph Ollama Agent API",
-        version="0.6.0",
+        version="0.7.0",
         description="Web・モバイル向けLangGraphエージェントAPI",
         lifespan=build_lifespan(active_settings, enabled=managed_database),
     )
@@ -286,6 +305,28 @@ def create_app(
     app.state.model_service = model_service or OllamaModelService(
         active_settings.ollama_base_url,
         active_settings.ollama_health_timeout_seconds,
+    )
+    app.state.vision_service = vision_service or VisionService(
+        base_url=active_settings.ollama_base_url,
+        default_model=active_settings.vision_model,
+        allowed_models=active_settings.allowed_vision_models,
+        timeout_seconds=active_settings.vision_timeout_seconds,
+        think=active_settings.vision_think,
+        keep_alive=active_settings.vision_keep_alive,
+        max_image_bytes=active_settings.vision_max_image_bytes,
+        allowed_mime_types=active_settings.allowed_vision_mime_types,
+        max_prompt_chars=active_settings.vision_max_prompt_chars,
+        max_schema_bytes=active_settings.vision_max_schema_bytes,
+        max_response_bytes=active_settings.vision_max_response_bytes,
+        max_image_width=active_settings.vision_max_image_width,
+        max_image_height=active_settings.vision_max_image_height,
+        max_image_pixels=active_settings.vision_max_image_pixels,
+        max_model_image_edge=active_settings.vision_max_model_image_edge,
+        max_schema_depth=active_settings.vision_max_schema_depth,
+        max_schema_properties=active_settings.vision_max_schema_properties,
+        max_array_items=active_settings.vision_max_array_items,
+        max_output_string_chars=active_settings.vision_max_output_string_chars,
+        temperature=active_settings.temperature,
     )
     app.state.conversation_store = conversation_store or InMemoryConversationStore()
     app.state.note_store = note_store or InMemoryNoteStore()
@@ -382,6 +423,44 @@ def create_app(
             status_code=_agent_error_status(error),
             code=error.code,
             message=error.user_message,
+        )
+
+    @app.exception_handler(VisionServiceError)
+    async def handle_vision_error(
+        request: Request,
+        error: VisionServiceError,
+    ) -> JSONResponse:
+        return _error_response(
+            request,
+            status_code=error.status_code,
+            code=error.code,
+            message=error.user_message,
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def handle_request_validation(
+        request: Request,
+        error: RequestValidationError,
+    ) -> Response:
+        if request.url.path != "/v1/vision/analyze":
+            return await request_validation_exception_handler(request, error)
+        fields = {
+            str(item)
+            for detail in error.errors()
+            for item in detail.get("loc", ())
+        }
+        if "image" in fields:
+            return _error_response(
+                request,
+                status_code=status.HTTP_400_BAD_REQUEST,
+                code="invalid_image",
+                message="有効な画像ファイルを指定してください。",
+            )
+        return _error_response(
+            request,
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="invalid_prompt",
+            message="画像解析の指示を確認してください。",
         )
 
     @app.exception_handler(Exception)
@@ -632,6 +711,70 @@ def create_app(
                 "Ollamaに接続できません。",
             )
         return ModelListResponse(models=list(ollama_status.models))
+
+    @app.post(
+        "/v1/vision/analyze",
+        response_model=VisionAnalyzeResponse,
+        responses={
+            400: {"model": ErrorResponse},
+            401: {"model": ErrorResponse},
+            413: {"model": ErrorResponse},
+            429: {"model": ErrorResponse},
+            502: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+            504: {"model": ErrorResponse},
+        },
+        tags=["vision"],
+    )
+    async def analyze_image(
+        request: Request,
+        user_id: CurrentUserId,
+        image: Annotated[
+            UploadFile,
+            File(description="JPEG、PNG、WebPのいずれか1枚"),
+        ],
+        prompt: Annotated[
+            str,
+            Form(description="画像に対して実行する指示"),
+        ],
+        response_schema: Annotated[
+            str | None,
+            Form(description="任意のJSON Schema文字列"),
+        ] = None,
+        model: Annotated[
+            str | None,
+            Form(description="許可済み画像対応モデル"),
+        ] = None,
+    ) -> VisionAnalyzeResponse:
+        if active_settings.rate_limit_enabled:
+            result = await app.state.rate_limiter.hit(
+                "vision",
+                str(user_id),
+                limit=active_settings.vision_rate_limit_requests,
+                window_seconds=active_settings.vision_rate_limit_window_seconds,
+            )
+            request.state.rate_limit_result = result
+            if not result.allowed:
+                raise ApiProblem(
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                    "rate_limit_exceeded",
+                    "画像解析のリクエストが多すぎます。時間をおいて再試行してください。",
+                    headers=rate_limit_headers(result, rejected=True),
+                )
+
+        declared_mime_type = image.content_type
+        content = await read_image_upload(
+            image,
+            max_bytes=active_settings.vision_max_image_bytes,
+        )
+        result = await app.state.vision_service.analyze(
+            image=content,
+            declared_mime_type=declared_mime_type,
+            prompt=prompt,
+            response_schema=response_schema,
+            model=model,
+        )
+        return VisionAnalyzeResponse(content=result.content, model=result.model)
 
     @app.post(
         "/v1/conversations",

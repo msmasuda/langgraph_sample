@@ -10,6 +10,7 @@ from src.services.conversation_service import (
     NoteRecord,
 )
 from src.services.model_service import OllamaModelService, OllamaStatus
+from src.services.vision_service import VisionAnalysisResult, VisionService
 
 __all__ = [
     "AgentEvent",
@@ -23,4 +24,6 @@ __all__ = [
     "NoteRecord",
     "OllamaModelService",
     "OllamaStatus",
+    "VisionAnalysisResult",
+    "VisionService",
 ]

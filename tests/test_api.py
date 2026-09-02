@@ -19,6 +19,7 @@ from src.services import (
     ConversationExecutionRegistry,
     InMemoryConversationStore,
     OllamaStatus,
+    VisionAnalysisResult,
 )
 
 
@@ -135,6 +136,18 @@ class StubAgentService:
         self.deleted_threads.append(thread_id)
 
 
+class StubVisionService:
+    """Return a deterministic generic vision result."""
+
+    def __init__(self, content=None) -> None:
+        self.content = content if content is not None else "画像の説明です。"
+        self.calls: list[dict[str, object]] = []
+
+    async def analyze(self, **values):
+        self.calls.append(values)
+        return VisionAnalysisResult(content=self.content, model="vision-model")
+
+
 def make_test_app(
     *,
     agent_service=None,
@@ -143,6 +156,7 @@ def make_test_app(
     note_store=None,
     execution_registry=None,
     settings_overrides=None,
+    vision_service=None,
 ):
     setting_values = {
         "auth_mode": "disabled",
@@ -162,6 +176,7 @@ def make_test_app(
         conversation_store=conversation_store,
         note_store=note_store,
         execution_registry=execution_registry,
+        vision_service=vision_service or StubVisionService(),
     )
 
 
@@ -192,6 +207,7 @@ async def test_health_request_id_and_openapi_paths():
         "/health",
         "/ready",
         "/v1/models",
+        "/v1/vision/analyze",
         "/v1/conversations",
         "/v1/conversations/{conversation_id}",
         "/v1/conversations/{conversation_id}/cancel",
@@ -200,7 +216,133 @@ async def test_health_request_id_and_openapi_paths():
         "/v1/conversations/{conversation_id}/messages",
         "/v1/conversations/{conversation_id}/messages/stream",
     }
-    assert expected_paths.issubset(openapi.json()["paths"])
+    specification = openapi.json()
+    assert expected_paths.issubset(specification["paths"])
+    assert specification["info"]["version"] == "0.7.0"
+    vision_operation = specification["paths"]["/v1/vision/analyze"]["post"]
+    multipart_schema = vision_operation["requestBody"]["content"][
+        "multipart/form-data"
+    ]["schema"]
+    component_name = multipart_schema["$ref"].rsplit("/", 1)[-1]
+    required_fields = specification["components"]["schemas"][component_name][
+        "required"
+    ]
+    assert set(required_fields) == {"image", "prompt"}
+
+
+@pytest.mark.asyncio
+async def test_vision_endpoint_accepts_text_and_structured_results():
+    text_service = StubVisionService()
+    structured_service = StubVisionService({"dishName": "カレー"})
+    png = image_bytes = b"\x89PNG\r\n\x1a\nmock"
+
+    text_app = make_test_app(vision_service=text_service)
+    structured_app = make_test_app(vision_service=structured_service)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=text_app),
+        base_url="http://testserver",
+    ) as client:
+        text_response = await client.post(
+            "/v1/vision/analyze",
+            files={"image": ("image.png", png, "image/png")},
+            data={"prompt": "画像を説明してください。"},
+        )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=structured_app),
+        base_url="http://testserver",
+    ) as client:
+        structured_response = await client.post(
+            "/v1/vision/analyze",
+            files={"image": ("meal.png", png, "image/png")},
+            data={
+                "prompt": "料理を推定してください。",
+                "response_schema": '{"type":"object"}',
+                "model": "vision-model",
+            },
+        )
+
+    assert text_response.status_code == 200
+    assert text_response.json() == {
+        "content": "画像の説明です。",
+        "model": "vision-model",
+    }
+    assert structured_response.status_code == 200
+    assert structured_response.json()["content"] == {"dishName": "カレー"}
+    assert text_service.calls[0]["image"] == png
+    assert text_service.calls[0]["declared_mime_type"] == "image/png"
+    assert structured_service.calls[0]["model"] == "vision-model"
+
+
+@pytest.mark.asyncio
+async def test_vision_endpoint_has_a_separate_rate_limit():
+    vision = StubVisionService()
+    app = make_test_app(
+        vision_service=vision,
+        settings_overrides={
+            "rate_limit_enabled": True,
+            "rate_limit_ip_requests": 100,
+            "rate_limit_user_requests": 100,
+            "vision_rate_limit_requests": 1,
+            "vision_rate_limit_window_seconds": 60,
+        },
+    )
+    transport = httpx.ASGITransport(app=app)
+    request = {
+        "files": {"image": ("image.png", b"image-data", "image/png")},
+        "data": {"prompt": "説明してください。"},
+    }
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as client:
+        first = await client.post("/v1/vision/analyze", **request)
+        rejected = await client.post("/v1/vision/analyze", **request)
+
+    assert first.status_code == 200
+    assert rejected.status_code == 429
+    assert rejected.json()["error"]["code"] == "rate_limit_exceeded"
+    assert rejected.headers["RateLimit-Limit"] == "1"
+    assert len(vision.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_vision_endpoint_uses_safe_errors_for_missing_fields_and_large_files():
+    vision = StubVisionService()
+    app = make_test_app(
+        vision_service=vision,
+        settings_overrides={"vision_max_image_bytes": 3},
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as client:
+        missing_image = await client.post(
+            "/v1/vision/analyze",
+            data={"prompt": "説明してください。"},
+        )
+        missing_prompt = await client.post(
+            "/v1/vision/analyze",
+            files={"image": ("image.png", b"png", "image/png")},
+        )
+        too_large = await client.post(
+            "/v1/vision/analyze",
+            files={"image": ("image.png", b"large", "image/png")},
+            data={"prompt": "説明してください。"},
+            headers={"X-Request-ID": "vision-too-large"},
+        )
+
+    assert missing_image.status_code == 400
+    assert missing_image.json()["error"]["code"] == "invalid_image"
+    assert missing_prompt.status_code == 400
+    assert missing_prompt.json()["error"]["code"] == "invalid_prompt"
+    assert too_large.status_code == 413
+    assert too_large.json()["error"] == {
+        "code": "image_too_large",
+        "message": "画像のファイルサイズまたは解像度が上限を超えています。",
+        "request_id": "vision-too-large",
+    }
+    assert not vision.calls
 
 
 @pytest.mark.asyncio

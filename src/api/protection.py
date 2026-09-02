@@ -30,6 +30,9 @@ _SENSITIVE_KEYS = {
     "arguments",
     "prompt",
     "content",
+    "image",
+    "images",
+    "base64",
 }
 _SENSITIVE_KEY_FRAGMENTS = (
     "authorization",
@@ -38,6 +41,8 @@ _SENSITIVE_KEY_FRAGMENTS = (
     "secret",
     "token",
     "api_key",
+    "image",
+    "base64",
 )
 _BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+\-/]+=*")
 _EMAIL_PATTERN = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
