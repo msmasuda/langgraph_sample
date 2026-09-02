@@ -25,6 +25,8 @@ ollama pull qwen3.5:9b-mlx
 ```ini
 VISION_MODEL=qwen3.5:9b-mlx
 VISION_ALLOWED_MODELS=
+VISION_THINK=false
+VISION_KEEP_ALIVE=30m
 ```
 
 APIは解析前にOllamaの`/api/show`を呼び、モデルが存在し、`capabilities`に`vision`を含むことを確認します。モデル名だけから画像対応可否を推測しません。
@@ -119,6 +121,8 @@ curl -X POST http://127.0.0.1:8000/v1/vision/analyze \
 | `VISION_MODEL` | `qwen3.5:9b-mlx` | 既定の画像対応モデル |
 | `VISION_ALLOWED_MODELS` | 空 | クライアント指定を許可する追加モデル |
 | `VISION_TIMEOUT_SECONDS` | `120` | Ollama呼び出し上限秒数 |
+| `VISION_THINK` | `false` | 画像抽出で不要な思考生成を停止 |
+| `VISION_KEEP_ALIVE` | `30m` | 解析後にモデルをメモリへ保持する時間 |
 | `VISION_MAX_IMAGE_BYTES` | `10485760` | 画像最大バイト数 |
 | `VISION_ALLOWED_MIME_TYPES` | JPEG/PNG/WebP | 許可MIMEタイプ |
 | `VISION_MAX_PROMPT_CHARS` | `5000` | 指示の最大文字数 |
@@ -127,6 +131,7 @@ curl -X POST http://127.0.0.1:8000/v1/vision/analyze \
 | `VISION_MAX_IMAGE_WIDTH` | `8192` | 最大横幅 |
 | `VISION_MAX_IMAGE_HEIGHT` | `8192` | 最大縦幅 |
 | `VISION_MAX_IMAGE_PIXELS` | `25000000` | 最大総ピクセル数 |
+| `VISION_MAX_MODEL_IMAGE_EDGE` | `1280` | Ollama送信前に縮小する長辺上限 |
 | `VISION_MAX_SCHEMA_DEPTH` | `8` | スキーマ・出力の最大深さ |
 | `VISION_MAX_SCHEMA_PROPERTIES` | `100` | スキーマノード・プロパティ数上限 |
 | `VISION_MAX_ARRAY_ITEMS` | `100` | 構造化出力の配列要素上限 |
@@ -139,6 +144,15 @@ curl -X POST http://127.0.0.1:8000/v1/vision/analyze \
 認証処理を切り分けるローカル検証だけは、`.env`で`AUTH_MODE=disabled`にしてBearerヘッダーを省略できます。LAN・インターネットへ公開する環境では必ず`AUTH_MODE=oidc`を使用してください。
 
 実モデル疎通では、APIを起動後に上記curlを実行します。`vision_model_unavailable`の場合は、`ollama list`でモデル名を確認し、OllamaがAPIサーバーから到達できることを確認してください。
+
+## 応答速度の調整
+
+既定では、画像解析に不要な思考生成を停止し、モデルを解析後30分間メモリへ保持します。スマートフォンの高解像度画像は、入力検証後にアスペクト比を保ったまま長辺1280pxへ縮小してからOllamaへ送ります。元画像は保存しません。
+
+- 常時利用し、メモリに余裕がある場合は`VISION_KEEP_ALIVE=-1`でモデルを常駐できます。
+- メモリを早く解放する場合は`5m`など短い時間へ変更できます。
+- 細かい文字や小物の認識精度を優先する場合は`VISION_MAX_MODEL_IMAGE_EDGE`を1600前後へ上げて比較してください。
+- さらに速度を優先する場合は、画像対応モデルを導入後、`VISION_MODEL=qwen3-vl:4b`などの軽量モデルへ変更できます。
 
 ## 保存・ログ・削除
 

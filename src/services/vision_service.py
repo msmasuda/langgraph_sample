@@ -80,6 +80,8 @@ class VisionService:
         default_model: str,
         allowed_models: frozenset[str],
         timeout_seconds: float,
+        think: bool,
+        keep_alive: str,
         max_image_bytes: int,
         allowed_mime_types: frozenset[str],
         max_prompt_chars: int,
@@ -88,6 +90,7 @@ class VisionService:
         max_image_width: int,
         max_image_height: int,
         max_image_pixels: int,
+        max_model_image_edge: int,
         max_schema_depth: int,
         max_schema_properties: int,
         max_array_items: int,
@@ -99,6 +102,8 @@ class VisionService:
         self.default_model = default_model
         self.allowed_models = allowed_models
         self.timeout_seconds = timeout_seconds
+        self.think = think
+        self.keep_alive = keep_alive
         self.max_image_bytes = max_image_bytes
         self.allowed_mime_types = allowed_mime_types
         self.max_prompt_chars = max_prompt_chars
@@ -107,6 +112,7 @@ class VisionService:
         self.max_image_width = max_image_width
         self.max_image_height = max_image_height
         self.max_image_pixels = max_image_pixels
+        self.max_model_image_edge = max_model_image_edge
         self.max_schema_depth = max_schema_depth
         self.max_schema_properties = max_schema_properties
         self.max_array_items = max_array_items
@@ -149,6 +155,8 @@ class VisionService:
                 }
             ],
             "stream": False,
+            "think": self.think,
+            "keep_alive": self.keep_alive,
             "options": {"temperature": 0 if schema is not None else self.temperature},
         }
         if schema is not None:
@@ -260,6 +268,15 @@ class VisionService:
                     source.load()
                     clean = ImageOps.exif_transpose(source).copy()
                     clean.info.clear()
+                    if max(clean.size) > self.max_model_image_edge:
+                        clean.thumbnail(
+                            (
+                                self.max_model_image_edge,
+                                self.max_model_image_edge,
+                            ),
+                            Image.Resampling.LANCZOS,
+                            reducing_gap=3.0,
+                        )
         except (UnsupportedImageTypeError, ImageTooLargeError, InvalidImageError):
             raise
         except (

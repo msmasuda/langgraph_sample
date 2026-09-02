@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     vision_model: str = "qwen3.5:9b-mlx"
     vision_allowed_models: str = ""
     vision_timeout_seconds: float = Field(default=120.0, gt=0.0, le=600.0)
+    vision_think: bool = False
+    vision_keep_alive: str = Field(
+        default="30m",
+        min_length=1,
+        max_length=20,
+        pattern=r"^-?\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h)?$",
+    )
     vision_max_image_bytes: int = Field(default=10_485_760, ge=1, le=52_428_800)
     vision_allowed_mime_types: str = "image/jpeg,image/png,image/webp"
     vision_max_prompt_chars: int = Field(default=5_000, ge=1, le=20_000)
@@ -43,6 +50,7 @@ class Settings(BaseSettings):
     vision_max_image_width: int = Field(default=8_192, ge=1, le=32_768)
     vision_max_image_height: int = Field(default=8_192, ge=1, le=32_768)
     vision_max_image_pixels: int = Field(default=25_000_000, ge=1, le=100_000_000)
+    vision_max_model_image_edge: int = Field(default=1_280, ge=256, le=8_192)
     vision_max_schema_depth: int = Field(default=8, ge=1, le=32)
     vision_max_schema_properties: int = Field(default=100, ge=1, le=1_000)
     vision_max_array_items: int = Field(default=100, ge=1, le=10_000)

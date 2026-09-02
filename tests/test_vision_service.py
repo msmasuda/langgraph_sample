@@ -47,6 +47,8 @@ def service(
         "default_model": "vision-model",
         "allowed_models": frozenset({"vision-model", "other-vision"}),
         "timeout_seconds": 3,
+        "think": False,
+        "keep_alive": "30m",
         "max_image_bytes": 1_000_000,
         "allowed_mime_types": frozenset(
             {"image/jpeg", "image/png", "image/webp"}
@@ -57,6 +59,7 @@ def service(
         "max_image_width": 100,
         "max_image_height": 100,
         "max_image_pixels": 10_000,
+        "max_model_image_edge": 64,
         "max_schema_depth": 6,
         "max_schema_properties": 20,
         "max_array_items": 10,
@@ -116,6 +119,8 @@ async def test_supported_images_return_text_and_are_sanitized(
         assert decoded.format == image_format
         assert "exif" not in decoded.info
     assert "format" not in captured[0]
+    assert captured[0]["think"] is False
+    assert captured[0]["keep_alive"] == "30m"
 
 
 @pytest.mark.asyncio
@@ -181,6 +186,28 @@ async def test_exif_metadata_is_removed_before_model_request():
     sanitized = base64.b64decode(captured[0]["messages"][0]["images"][0])
     with Image.open(io.BytesIO(sanitized)) as decoded:
         assert not decoded.getexif()
+
+
+@pytest.mark.asyncio
+async def test_large_image_is_downscaled_before_model_request():
+    captured: list[dict[str, Any]] = []
+    analyzer = service(
+        ollama_handler("説明", captured=captured),
+        max_image_width=300,
+        max_image_height=300,
+        max_image_pixels=30_000,
+        max_model_image_edge=64,
+    )
+
+    await analyzer.analyze(
+        image=image_bytes(size=(200, 100)),
+        declared_mime_type="image/png",
+        prompt="説明してください。",
+    )
+
+    resized = base64.b64decode(captured[0]["messages"][0]["images"][0])
+    with Image.open(io.BytesIO(resized)) as decoded:
+        assert decoded.size == (64, 32)
 
 
 @pytest.mark.asyncio
