@@ -27,6 +27,13 @@ class ModelListResponse(BaseModel):
     models: list[str]
 
 
+class VisionAnalyzeResponse(BaseModel):
+    """Generic text or structured result returned by a vision model."""
+
+    content: Any
+    model: str
+
+
 class ConversationResponse(BaseModel):
     """Conversation metadata."""
 

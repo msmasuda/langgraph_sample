@@ -46,3 +46,62 @@ class ModelServiceError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__(self.user_message)
+
+
+class VisionServiceError(RuntimeError):
+    """Base class for safe errors returned by the vision API."""
+
+    code = "vision_model_unavailable"
+    user_message = "画像解析モデルを利用できません。"
+    status_code = 503
+
+    def __init__(self) -> None:
+        super().__init__(self.user_message)
+
+
+class InvalidImageError(VisionServiceError):
+    code = "invalid_image"
+    user_message = "有効な画像ファイルを指定してください。"
+    status_code = 400
+
+
+class UnsupportedImageTypeError(VisionServiceError):
+    code = "unsupported_image_type"
+    user_message = "この画像形式は使用できません。JPEG、PNG、WebPを指定してください。"
+    status_code = 400
+
+
+class ImageTooLargeError(VisionServiceError):
+    code = "image_too_large"
+    user_message = "画像のファイルサイズまたは解像度が上限を超えています。"
+    status_code = 413
+
+
+class InvalidPromptError(VisionServiceError):
+    code = "invalid_prompt"
+    user_message = "画像解析の指示を確認してください。"
+    status_code = 400
+
+
+class InvalidResponseSchemaError(VisionServiceError):
+    code = "invalid_response_schema"
+    user_message = "レスポンス用JSON Schemaが無効または複雑すぎます。"
+    status_code = 400
+
+
+class VisionModelUnavailableError(VisionServiceError):
+    code = "vision_model_unavailable"
+    user_message = "指定された画像解析モデルを利用できません。"
+    status_code = 503
+
+
+class VisionTimeoutError(VisionServiceError):
+    code = "vision_timeout"
+    user_message = "画像解析がタイムアウトしました。時間をおいて再度お試しください。"
+    status_code = 504
+
+
+class SchemaValidationFailedError(VisionServiceError):
+    code = "schema_validation_failed"
+    user_message = "画像解析結果が指定されたJSON Schemaに適合しませんでした。"
+    status_code = 502

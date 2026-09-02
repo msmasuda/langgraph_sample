@@ -113,6 +113,28 @@ async def test_oidc_requires_bearer_token_but_keeps_health_public(oidc_component
 
 
 @pytest.mark.asyncio
+async def test_vision_endpoint_rejects_missing_and_invalid_tokens(oidc_components):
+    settings, authenticator, _private_key = oidc_components
+    transport = httpx.ASGITransport(app=_app(settings, authenticator))
+    request = {
+        "files": {"image": ("image.png", b"image-data", "image/png")},
+        "data": {"prompt": "説明してください。"},
+    }
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        missing = await client.post("/v1/vision/analyze", **request)
+        invalid = await client.post(
+            "/v1/vision/analyze",
+            headers={"Authorization": "Bearer invalid-token"},
+            **request,
+        )
+
+    assert missing.status_code == 401
+    assert missing.json()["error"]["code"] == "authentication_required"
+    assert invalid.status_code == 401
+    assert invalid.json()["error"]["code"] == "invalid_access_token"
+
+
+@pytest.mark.asyncio
 async def test_oidc_subjects_are_isolated_from_each_other(oidc_components):
     settings, authenticator, private_key = oidc_components
     transport = httpx.ASGITransport(app=_app(settings, authenticator))

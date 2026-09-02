@@ -31,6 +31,25 @@ class Settings(BaseSettings):
     ollama_request_timeout_seconds: float = Field(default=60.0, gt=0.0, le=600.0)
     ollama_health_timeout_seconds: float = Field(default=3.0, gt=0.0, le=30.0)
 
+    # Generic vision analysis settings
+    vision_model: str = "qwen3.5:9b-mlx"
+    vision_allowed_models: str = ""
+    vision_timeout_seconds: float = Field(default=120.0, gt=0.0, le=600.0)
+    vision_max_image_bytes: int = Field(default=10_485_760, ge=1, le=52_428_800)
+    vision_allowed_mime_types: str = "image/jpeg,image/png,image/webp"
+    vision_max_prompt_chars: int = Field(default=5_000, ge=1, le=20_000)
+    vision_max_schema_bytes: int = Field(default=16_384, ge=1, le=262_144)
+    vision_max_response_bytes: int = Field(default=1_048_576, ge=1, le=10_485_760)
+    vision_max_image_width: int = Field(default=8_192, ge=1, le=32_768)
+    vision_max_image_height: int = Field(default=8_192, ge=1, le=32_768)
+    vision_max_image_pixels: int = Field(default=25_000_000, ge=1, le=100_000_000)
+    vision_max_schema_depth: int = Field(default=8, ge=1, le=32)
+    vision_max_schema_properties: int = Field(default=100, ge=1, le=1_000)
+    vision_max_array_items: int = Field(default=100, ge=1, le=10_000)
+    vision_max_output_string_chars: int = Field(default=10_000, ge=1, le=100_000)
+    vision_rate_limit_requests: int = Field(default=10, ge=1, le=10_000)
+    vision_rate_limit_window_seconds: int = Field(default=60, ge=1, le=3_600)
+
     # API settings
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8000, ge=1, le=65_535)
@@ -111,6 +130,20 @@ class Settings(BaseSettings):
     def tools_requiring_approval(self) -> frozenset[str]:
         """Return external side-effect tools requiring explicit approval."""
         return frozenset(self._comma_separated(self.approval_required_tools))
+
+    @property
+    def allowed_vision_models(self) -> frozenset[str]:
+        """Return the explicit allowlist for client-selected vision models."""
+        return frozenset(
+            (self.vision_model, *self._comma_separated(self.vision_allowed_models))
+        )
+
+    @property
+    def allowed_vision_mime_types(self) -> frozenset[str]:
+        """Return normalized MIME types accepted by the vision endpoint."""
+        return frozenset(
+            item.lower() for item in self._comma_separated(self.vision_allowed_mime_types)
+        )
 
 
 @lru_cache
