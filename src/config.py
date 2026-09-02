@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     vision_model: str = "qwen3.5:9b-mlx"
     vision_allowed_models: str = ""
     vision_timeout_seconds: float = Field(default=120.0, gt=0.0, le=600.0)
+    vision_preload: bool = True
+    vision_preload_timeout_seconds: float = Field(default=30.0, gt=0.0, le=600.0)
     vision_think: bool = False
     vision_keep_alive: str = Field(
         default="30m",

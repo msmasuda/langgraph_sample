@@ -25,6 +25,8 @@ ollama pull qwen3.5:9b-mlx
 ```ini
 VISION_MODEL=qwen3.5:9b-mlx
 VISION_ALLOWED_MODELS=
+VISION_PRELOAD=true
+VISION_PRELOAD_TIMEOUT_SECONDS=30
 VISION_THINK=false
 VISION_KEEP_ALIVE=30m
 ```
@@ -121,6 +123,8 @@ curl -X POST http://127.0.0.1:8000/v1/vision/analyze \
 | `VISION_MODEL` | `qwen3.5:9b-mlx` | 既定の画像対応モデル |
 | `VISION_ALLOWED_MODELS` | 空 | クライアント指定を許可する追加モデル |
 | `VISION_TIMEOUT_SECONDS` | `120` | Ollama呼び出し上限秒数 |
+| `VISION_PRELOAD` | `true` | API起動時に既定モデルを事前ロード |
+| `VISION_PRELOAD_TIMEOUT_SECONDS` | `30` | プリロードでAPI起動を待つ最大秒数 |
 | `VISION_THINK` | `false` | 画像抽出で不要な思考生成を停止 |
 | `VISION_KEEP_ALIVE` | `30m` | 解析後にモデルをメモリへ保持する時間 |
 | `VISION_MAX_IMAGE_BYTES` | `10485760` | 画像最大バイト数 |
@@ -147,8 +151,11 @@ curl -X POST http://127.0.0.1:8000/v1/vision/analyze \
 
 ## 応答速度の調整
 
-既定では、画像解析に不要な思考生成を停止し、モデルを解析後30分間メモリへ保持します。スマートフォンの高解像度画像は、入力検証後にアスペクト比を保ったまま長辺1280pxへ縮小してからOllamaへ送ります。元画像は保存しません。
+既定では、API起動時に画像モデルを事前ロードし、最初の利用者リクエストへロード時間を負担させません。プリロードに失敗しても会話API全体は起動し、画像解析リクエスト時に再接続します。画像解析に不要な思考生成を停止し、モデルを解析後30分間メモリへ保持します。スマートフォンの高解像度画像は、入力検証後にアスペクト比を保ったまま長辺1280pxへ縮小してからOllamaへ送ります。元画像は保存しません。
 
+- Ollamaを別途起動した後でAPIを起動してください。API起動完了までにモデルロード時間が加わります。
+- 開発時にAPIを素早く起動したい場合は`VISION_PRELOAD=false`にできます。
+- 30秒でロードできないモデルを使う場合は`VISION_PRELOAD_TIMEOUT_SECONDS`を調整してください。上限超過時もAPIは起動し、最初の画像解析時に再度ロードします。
 - 常時利用し、メモリに余裕がある場合は`VISION_KEEP_ALIVE=-1`でモデルを常駐できます。
 - メモリを早く解放する場合は`5m`など短い時間へ変更できます。
 - 細かい文字や小物の認識精度を優先する場合は`VISION_MAX_MODEL_IMAGE_EDGE`を1600前後へ上げて比較してください。

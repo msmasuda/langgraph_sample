@@ -95,6 +95,24 @@ def ollama_handler(
 
 
 @pytest.mark.asyncio
+async def test_preload_loads_default_model_with_keep_alive():
+    captured: list[dict[str, Any]] = []
+    analyzer = service(ollama_handler("", captured=captured))
+
+    await analyzer.preload()
+
+    assert captured == [
+        {
+            "model": "vision-model",
+            "messages": [],
+            "stream": False,
+            "think": False,
+            "keep_alive": "30m",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("image_format", "mime_type"),
     [("JPEG", "image/jpeg"), ("PNG", "image/png"), ("WEBP", "image/webp")],
