@@ -60,6 +60,14 @@ langgraph_sample/
 │   └── keycloak/               # Dockge向けKeycloak・Realm設定
 ├── README.md                   # 本ドキュメント
 ├── docs/
+│   ├── README.md               # ドキュメント目次
+│   ├── architecture.md         # アーキテクチャ・設計詳細
+│   ├── usage_guide.md          # セットアップ・利用ガイド
+│   ├── customization.md        # 拡張・カスタマイズガイド
+│   ├── api_implementation_plan.md # Web・モバイル向けAPI実装計画
+│   ├── api_guide.md            # API利用ガイド
+│   ├── postgresql_guide.md     # PostgreSQL構築・移行ガイド
+│   ├── keycloak_oidc_guide.md  # Keycloak・OIDC構築ガイド
 │   └── vision-api.md           # 汎用画像解析API設計・利用ガイド
 ├── src/
 │   ├── __init__.py
