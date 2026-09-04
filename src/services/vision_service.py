@@ -120,6 +120,34 @@ class VisionService:
         self.temperature = temperature
         self.transport = transport
 
+    async def preload(self) -> None:
+        """Load and retain the default vision model without analyzing an image."""
+        selected_model = self._select_model(None)
+        payload = {
+            "model": selected_model,
+            "messages": [],
+            "stream": False,
+            "think": self.think,
+            "keep_alive": self.keep_alive,
+        }
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.base_url,
+                timeout=self.timeout_seconds,
+                transport=self.transport,
+            ) as client:
+                await self._ensure_vision_model(client, selected_model)
+                async with client.stream("POST", "/api/chat", json=payload) as response:
+                    if response.status_code >= 400:
+                        raise VisionModelUnavailableError()
+                    await self._read_json_response(response)
+        except VisionModelUnavailableError:
+            raise
+        except httpx.TimeoutException as error:
+            raise VisionTimeoutError() from error
+        except (httpx.HTTPError, json.JSONDecodeError, ValueError, TypeError) as error:
+            raise VisionModelUnavailableError() from error
+
     async def analyze(
         self,
         *,

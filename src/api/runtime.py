@@ -1,5 +1,7 @@
 """FastAPI lifespan wiring for the PostgreSQL production runtime."""
 
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
@@ -17,8 +19,11 @@ from src.db import (
     PostgresConversationExecutionRegistry,
 )
 from src.services import AgentService
+from src.errors import VisionServiceError
 from src.services.note_tools import create_database_note_tools
 from src.tools import calculator, get_current_datetime, web_search
+
+logger = logging.getLogger("langgraph.api")
 
 
 @asynccontextmanager
@@ -100,6 +105,16 @@ def build_lifespan(settings: Settings, *, enabled: bool) -> Any:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with database_lifespan(app, settings, enabled=enabled):
+            if settings.vision_preload:
+                try:
+                    async with asyncio.timeout(
+                        settings.vision_preload_timeout_seconds
+                    ):
+                        await app.state.vision_service.preload()
+                except (TimeoutError, VisionServiceError):
+                    logger.warning("vision.preload_failed")
+                else:
+                    logger.info("vision.preloaded")
             yield
 
     return lifespan
