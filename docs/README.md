@@ -39,6 +39,10 @@
    - Dockge向けKeycloak構成
    - WEB・モバイルのPKCEクライアント
    - APIのJWT検証設定と確認方法
+8. **[Supabase移行計画書](supabase_migration_plan.md)**
+   - 本番Supabase Cloud・ローカルDocker開発への移行計画
+   - DB・認証（HS256/JWKS）・Streamlit連携設計
+   - Codex向け実装指示書・タスクリスト
 
 ### 実装状況
 
