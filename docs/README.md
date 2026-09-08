@@ -36,12 +36,13 @@
    - AlembicとLangGraphテーブル初期化
    - SQLite移行、保存期限、バックアップ上の注意
 7. **[Keycloak・OIDC構築ガイド](keycloak_oidc_guide.md)**
-   - Dockge向けKeycloak構成
+   - ロールバック用Keycloak構成
    - WEB・モバイルのPKCEクライアント
    - APIのJWT検証設定と確認方法
 8. **[Supabase移行計画書](supabase_migration_plan.md)**
-   - 本番Supabase Cloud・ローカルDocker開発への移行計画
-   - DB・認証（HS256/JWKS）・Streamlit連携設計
+   - 本番Supabase Cloud・ローカルDocker開発への移行仕様と進捗
+   - DB・認証（RS256/ES256・JWKS）・Streamlit連携設計
+   - Data API非公開化、Direct／Session Pooler接続、セッション更新方針
    - Codex向け実装指示書・タスクリスト
 
 ### 実装状況
@@ -54,6 +55,7 @@
 - フェーズ5「StreamlitのAPIクライアント化」：`develop`へマージ済み
 - Streamlit会話選択改善：`codex/fix-streamlit-conversation-selection`ブランチで実装・動作確認済み
 - Streamlit IME誤送信・生成停止改善：`codex/fix-streamlit-ime-cancel`ブランチで実装・自動テスト済み（ログイン後の実画面確認待ち）
+- Supabase移行：アプリ・Dockge構成・自動テストを実装済み、ローカル実環境確認待ち
 - フェーズ6以降：未着手
 
 ---

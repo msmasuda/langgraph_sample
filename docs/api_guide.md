@@ -2,12 +2,14 @@
 
 ## 1. 起動
 
-Ollama、PostgreSQL、Keycloakを起動し、プロジェクト直下の`.env`へ次を設定します。
+OllamaとSupabaseを起動し、プロジェクト直下の`.env`へ次を設定します。
 
 ```ini
 AUTH_MODE=oidc
-OIDC_ISSUER_URL=http://192.168.100.2:8080/realms/langgraph
-OIDC_AUDIENCE=langgraph-api
+OIDC_ISSUER_URL=http://192.168.100.2:8000/auth/v1
+OIDC_AUDIENCE=authenticated
+OIDC_JWKS_URL=http://192.168.100.2:8000/auth/v1/.well-known/jwks.json
+OIDC_JWT_ALGORITHM=ES256
 ```
 
 その後、APIサーバーを起動します。
@@ -93,10 +95,9 @@ SSEのイベント種別：
 
 ## 4. 認証
 
-- WEBはKeycloak client ID `langgraph-web`、モバイルは`langgraph-mobile`を使用します。
-- どちらもAuthorization Code + PKCE（S256）を使用し、クライアントシークレットをアプリへ保存しません。
+- WEB・モバイルはSupabase Authの公開可能なpublishable keyを使用し、secret keyをアプリへ保存しません。
 - APIへ送るのはIDトークンではなくアクセストークンです。
-- APIはRS256署名、発行者、`langgraph-api` audience、有効期限、`sub`を検証します。
+- APIは設定したRS256またはES256署名、発行者、`authenticated` audience、有効期限、`sub`を検証します。
 - `sub`は内部ユーザーUUIDへ対応付けられます。同じ利用者は再ログイン後も同じ会話へアクセスできます。
 - 他ユーザーの会話IDへアクセスした場合、存在の推測を防ぐため`404 conversation_not_found`を返します。
 - アクセストークンの更新は各WEB・モバイルOIDCライブラリへ任せ、401受信時は一度だけ更新・再送してください。
@@ -170,6 +171,6 @@ WEB_API_BASE_URL=http://127.0.0.1:8000
 WEB_API_TIMEOUT_SECONDS=180
 ```
 
-OIDC有効時は`.streamlit/secrets.toml.example`を`.streamlit/secrets.toml`へコピーし、Keycloakの`langgraph-streamlit`クライアントシークレットを設定します。アクセストークンはStreamlitサーバー内のBearer認証にだけ使用し、ブラウザ画面、ログ、URLへ表示しません。
+OIDC有効時は`SUPABASE_URL`と`SUPABASE_PUBLISHABLE_KEY`を設定します。Streamlitは利用者ごとのaccess tokenとrefresh tokenを`st.session_state`だけに保持し、アクセストークンをサーバー側API呼び出しにだけ使用します。タブ終了・サーバー再起動後は再ログインが必要です。
 
 会話IDは`conversation`クエリパラメータへ保存しますが、APIは必ずJWT所有者を確認するため、他ユーザーがURLを知っていても会話を取得できません。回答はSSEで逐次表示し、ツール引数とツール出力はWeb UIへ表示しません。

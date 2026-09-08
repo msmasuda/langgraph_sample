@@ -82,13 +82,7 @@ uv run python -m src.cli
 
 ブラウザ上で利用できるAPIクライアント型チャットUIです。StreamlitはLangGraphやデータベースへ直接接続しないため、先にFastAPIを起動します。
 
-`AUTH_MODE=oidc`では、Keycloakに`langgraph-streamlit`機密クライアントを作成し、次の設定例をコピーしてクライアントシークレットを設定します。
-
-```bash
-cp .streamlit/secrets.toml.example .streamlit/secrets.toml
-```
-
-`.streamlit/secrets.toml`はGit対象外です。リダイレクトURIは`http://localhost:8501/oauth2callback`、`expose_tokens`は`access`を指定します。
+`AUTH_MODE=oidc`かつ`SUPABASE_URL`設定時はSupabaseのEmail/Passwordログインを表示します。設定は[`../deploy/supabase/README.md`](../deploy/supabase/README.md)を参照してください。`.streamlit/secrets.toml`はKeycloakへロールバックする場合だけ使用します。
 
 ```bash
 uv run streamlit run src/web_app.py
@@ -111,7 +105,7 @@ uv run streamlit run src/web_app.py
    - APIへ保存された会話単位のメモを参照できます。
 3. **接続・認証状態**:
    - API、Ollama、PostgreSQLの状態を表示します。
-   - `AUTH_MODE=oidc`ではKeycloakのログイン・ログアウトを提供し、アクセストークンをAPI呼び出しだけに使用します。
+   - `AUTH_MODE=oidc`ではSupabaseのログイン・自動更新・ログアウトを提供し、アクセストークンをAPI呼び出しだけに使用します。
    - モデルとTemperatureはAPIサーバー側の`.env`で管理します。
 
 ---
