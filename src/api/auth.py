@@ -34,7 +34,7 @@ class AuthenticatedPrincipal:
 
 
 class OpenIDConnectAuthenticator:
-    """Validate RS256 tokens using an OIDC provider's rotating JWKS."""
+    """Validate asymmetric tokens using an OIDC provider's rotating JWKS."""
 
     def __init__(
         self,
@@ -48,6 +48,7 @@ class OpenIDConnectAuthenticator:
         self.issuer = issuer
         self.audience = settings.oidc_audience
         self.jwks_url = settings.oidc_jwks_url
+        self.algorithm = settings.oidc_jwt_algorithm
         self.cache_seconds = settings.oidc_jwks_cache_seconds
         self.timeout_seconds = settings.oidc_http_timeout_seconds
         self.clock_skew_seconds = settings.oidc_clock_skew_seconds
@@ -63,7 +64,7 @@ class OpenIDConnectAuthenticator:
         except jwt.PyJWTError as error:
             raise AuthenticationError("アクセストークンが不正です。") from error
 
-        if header.get("alg") != "RS256":
+        if header.get("alg") != self.algorithm:
             raise AuthenticationError("アクセストークンが不正です。")
         kid = header.get("kid")
         if not isinstance(kid, str) or not kid:
@@ -74,7 +75,7 @@ class OpenIDConnectAuthenticator:
             claims = jwt.decode(
                 token,
                 key=key,
-                algorithms=["RS256"],
+                algorithms=[self.algorithm],
                 audience=self.audience,
                 issuer=self.issuer,
                 leeway=self.clock_skew_seconds,
@@ -135,7 +136,12 @@ class OpenIDConnectAuthenticator:
                 kid = item.get("kid")
                 if not isinstance(kid, str) or not kid:
                     continue
-                parsed[kid] = jwt.PyJWK.from_dict(item, algorithm="RS256").key
+                if item.get("alg") not in (None, self.algorithm):
+                    continue
+                parsed[kid] = jwt.PyJWK.from_dict(
+                    item,
+                    algorithm=self.algorithm,
+                ).key
             if not parsed:
                 raise ValueError("利用可能な署名鍵がありません")
         except AuthenticationUnavailable:

@@ -9,6 +9,7 @@ from typing import Any
 import streamlit as st
 
 from src.config import get_settings
+from src.supabase_auth import SupabaseAuthClient, SupabaseAuthError, SupabaseSession
 from src.web_api_client import AgentApiClient, AgentApiError
 from src.web_conversation_ui import (
     DEFAULT_CONVERSATION_TITLE,
@@ -117,7 +118,66 @@ with st.sidebar:
     st.caption(f"API接続先: `{settings.web_api_base_url}`")
 
 access_token: str | None = None
-if settings.auth_mode == "oidc":
+if settings.auth_mode == "oidc" and settings.supabase_url:
+    if not settings.supabase_publishable_key:
+        st.error("SUPABASE_PUBLISHABLE_KEYが設定されていません。")
+        st.stop()
+    auth_client = SupabaseAuthClient(
+        settings.supabase_url,
+        settings.supabase_publishable_key,
+        settings.oidc_http_timeout_seconds,
+    )
+    session = st.session_state.get("supabase_session")
+    if session is not None and not isinstance(session, SupabaseSession):
+        st.session_state.pop("supabase_session", None)
+        session = None
+    if session and session.expires_at <= time.time() + 60:
+        try:
+            session = auth_client.refresh(session.refresh_token)
+            st.session_state.supabase_session = session
+        except SupabaseAuthError as error:
+            st.session_state.pop("supabase_session", None)
+            st.warning(str(error))
+            session = None
+    if session is None:
+        st.info("Supabaseアカウントでログインすると会話を利用できます。")
+        with st.form("supabase_login", clear_on_submit=False):
+            email = st.text_input("メールアドレス")
+            password = st.text_input("パスワード", type="password")
+            submitted = st.form_submit_button(
+                "ログイン",
+                type="primary",
+                icon=":material/login:",
+            )
+        st.caption("タブを閉じた場合やサーバー再起動後は再ログインが必要です。")
+        if submitted:
+            if not email.strip() or not password:
+                st.warning("メールアドレスとパスワードを入力してください。")
+            else:
+                try:
+                    st.session_state.supabase_session = auth_client.sign_in(
+                        email,
+                        password,
+                    )
+                    st.rerun()
+                except SupabaseAuthError as error:
+                    st.error(str(error))
+        st.stop()
+    access_token = session.access_token
+    with st.sidebar:
+        st.divider()
+        st.subheader("認証")
+        st.success("Supabaseで認証済み", icon=":material/verified_user:")
+        if session.email:
+            st.caption(session.email)
+        if st.button("ログアウト", icon=":material/logout:", width="stretch"):
+            try:
+                auth_client.logout(session.access_token)
+            except SupabaseAuthError:
+                pass
+            st.session_state.pop("supabase_session", None)
+            st.rerun()
+elif settings.auth_mode == "oidc":
     configuration_error = streamlit_auth_error()
     if configuration_error:
         st.error(configuration_error)

@@ -3,6 +3,10 @@
 LangGraph、Python、ローカルLLM（Ollama）を組み合わせた自律型ReActエージェントアプリケーションです。
 Web検索、計算機、システム日時取得、メモ管理などのツールを自律的に判断して使い分け、マルチターンでの会話履歴を保持します。
 
+> [!NOTE]
+> Supabase Auth・PostgreSQLへの移行実装を追加しました。開発環境はDockge向けself-hosted構成、本番はSupabase Cloudを想定しています。Keycloak構成はロールバック用に残しています。
+> 2026-09-08: Dockge実機で5サービスの起動、Auth/JWKS・Studio認証・DB接続を確認済みです。DB公開ポートは`15432`です。アプリのAlembic適用と実ログインの結合確認は残っています。
+
 ---
 
 ## 🌟 特徴
@@ -21,7 +25,7 @@ Web検索、計算機、システム日時取得、メモ管理などのツー�
   - PostgreSQLによる会話・メモ・実行履歴・冪等性の永続化と複数APIプロセス間の同時実行制御に対応。
   - LangGraphチェックポイント用接続は貸出前に生存確認し、長時間アイドルで切断された接続を自動交換。
   - 会話一覧・更新・削除・履歴・キャンセル、メモCRUD、リクエストID、安全なエラー応答を提供。
-  - Keycloak/OIDCのRS256アクセストークンを検証し、JWTの`sub`ごとに会話・メモを分離。
+  - OIDCのRS256・ES256アクセストークンを検証し、JWTの`sub`ごとに会話・メモを分離。
   - WEB・モバイルはAuthorization Code + PKCEでログイン可能。`/health`・`/ready`以外のAPIをBearer認証で保護。
   - 許可Origin限定CORS、IP・ユーザー単位の共有レート制限、機密情報を記録しないJSONアクセスログに対応。
   - 外部副作用ツールは承認実行基盤へ接続されるまで登録を拒否する、フェイルクローズのツールポリシーを提供。
@@ -38,7 +42,7 @@ Web検索、計算機、システム日時取得、メモ管理などのツー�
   - 📝 **メモ管理 (`save_note`, `read_notes`)**: CLIではSQLite、API・StreamlitではPostgreSQLへ会話単位の共有メモを保存・読み出し
 - **3種類のインターフェース**:
   - 💻 **リッチCLI (`src/cli.py`)**: Richライブラリによるスタイリッシュな対話、ツール呼び出しプロセスの可視化
-  - 🌐 **Web UI (`src/web_app.py`)**: StreamlitによるKeycloakログイン、会話管理、SSE回答表示、安全なツール実行状態表示
+  - 🌐 **Web UI (`src/web_app.py`)**: StreamlitによるSupabaseログイン、会話管理、SSE回答表示、安全なツール実行状態表示
   - 🔌 **HTTP API (`src/api/app.py`)**: Web・モバイルアプリ向けJSON APIとSSEストリーミング
 
 ---
@@ -52,12 +56,13 @@ langgraph_sample/
 ├── .env.example                # 環境変数サンプル
 ├── .env                        # 設定ファイル (Ollama設定等)
 ├── .streamlit/
-│   └── secrets.toml.example    # Streamlit OIDC設定例（実シークレットはGit対象外）
+│   └── secrets.toml.example    # Keycloakロールバック用OIDC設定例
 ├── alembic.ini                 # DBマイグレーション設定
 ├── migrations/                # アプリ用PostgreSQLマイグレーション
 ├── deploy/
 │   ├── postgres/compose.yaml   # PostgreSQL用Docker Compose例
-│   └── keycloak/               # Dockge向けKeycloak・Realm設定
+│   ├── keycloak/               # ロールバック用Keycloak・Realm設定
+│   └── supabase/               # Dockge向けSupabase・鍵生成・手順
 ├── README.md                   # 本ドキュメント
 ├── docs/
 │   ├── README.md               # ドキュメント目次
@@ -68,6 +73,7 @@ langgraph_sample/
 │   ├── api_guide.md            # API利用ガイド
 │   ├── postgresql_guide.md     # PostgreSQL構築・移行ガイド
 │   ├── keycloak_oidc_guide.md  # Keycloak・OIDC構築ガイド
+│   ├── supabase_migration_plan.md # Supabase移行仕様・進捗
 │   └── vision-api.md           # 汎用画像解析API設計・利用ガイド
 ├── src/
 │   ├── __init__.py
@@ -100,6 +106,7 @@ langgraph_sample/
 │   │   ├── model_service.py    # Ollama接続確認・モデル一覧取得
 │   │   └── vision_service.py   # 画像・スキーマ検証、Ollama画像解析
 │   ├── cli.py                  # 対話型Rich CLIアプリケーション
+│   ├── supabase_auth.py        # Streamlit用Supabase Authクライアント
 │   ├── web_api_client.py       # Streamlit用FastAPI・SSEクライアント
 │   ├── web_conversation_ui.py  # 会話選択・表示名・自動タイトルの純粋ロジック
 │   └── web_app.py              # Streamlit Webチャットアプリケーション
@@ -111,6 +118,7 @@ langgraph_sample/
 │   ├── test_vision_api.py      # 画像アップロード一時領域の削除テスト
 │   ├── test_vision_service.py  # 画像・Schema・Ollama異常系テスト
 │   ├── test_auth.py            # JWT検証・認証必須・ユーザー分離テスト
+│   ├── test_supabase_auth.py   # Supabaseログイン・更新・ログアウトテスト
 │   ├── test_protection.py      # CORS・レート制限・ログ・承認ポリシーテスト
 │   ├── test_persistence.py     # DBリポジトリ・メモ・保存期限テスト
 │   ├── test_web_api_client.py  # Streamlit用APIクライアントテスト
@@ -147,7 +155,7 @@ uv sync
 
 ### 3. 環境設定
 
-`.env.example` をコピーして `.env` を作成します（必要に応じてモデル名やURLを変更）。
+`.env.example` をコピーして `.env` を作成します。ローカルSupabaseを既定としているため、`SUPABASE_PUBLISHABLE_KEY`と2つのDB接続URLにある`CHANGE_ME`をDockgeの値へ置き換えてください。
 
 ```bash
 cp .env.example .env
@@ -195,8 +203,12 @@ WEB_API_TIMEOUT_SECONDS=180
 IDEMPOTENCY_TTL_SECONDS=3600
 IDEMPOTENCY_MAX_ENTRIES=1000
 AUTH_MODE=oidc
-OIDC_ISSUER_URL=http://192.168.100.2:8080/realms/langgraph
-OIDC_AUDIENCE=langgraph-api
+OIDC_ISSUER_URL=http://192.168.100.2:8000/auth/v1
+OIDC_AUDIENCE=authenticated
+OIDC_JWKS_URL=http://192.168.100.2:8000/auth/v1/.well-known/jwks.json
+OIDC_JWT_ALGORITHM=ES256
+SUPABASE_URL=http://192.168.100.2:8000
+SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
 CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173
 RATE_LIMIT_ENABLED=true
 RATE_LIMIT_WINDOW_SECONDS=60
@@ -205,8 +217,8 @@ RATE_LIMIT_USER_REQUESTS=60
 API_JSON_LOGGING=true
 API_LOG_LEVEL=INFO
 APPROVAL_REQUIRED_TOOLS=send_email,create_calendar_event,delete_file,execute_payment
-DATABASE_URL=postgresql+asyncpg://langgraph:パスワード@192.168.100.2:5432/langgraph
-CHECKPOINT_DATABASE_URL=postgresql://langgraph:パスワード@192.168.100.2:5432/langgraph
+DATABASE_URL=postgresql+asyncpg://postgres:パスワード@192.168.100.2:15432/postgres
+CHECKPOINT_DATABASE_URL=postgresql://postgres:パスワード@192.168.100.2:15432/postgres
 DATABASE_POOL_SIZE=5
 DATABASE_MAX_OVERFLOW=10
 DATABASE_CONNECT_TIMEOUT_SECONDS=10
@@ -241,20 +253,14 @@ uv run python -m src.cli
 
 先にFastAPIを起動し、ブラウザ上で操作できるWebチャットインターフェースを起動します。StreamlitはLangGraphやデータベースへ直接接続せず、すべての操作を`WEB_API_BASE_URL`のAPIへ送信します。
 
-`AUTH_MODE=oidc`の場合は、Keycloakに機密クライアント`langgraph-streamlit`を作成し、OIDC設定例をコピーして実際のシークレットを設定します。
-
-```bash
-cp .streamlit/secrets.toml.example .streamlit/secrets.toml
-```
-
-`.streamlit/secrets.toml`はGit対象外です。Keycloak側には`http://localhost:8501/oauth2callback`を有効なリダイレクトURIとして登録します。詳しい手順は[`deploy/keycloak/README.md`](deploy/keycloak/README.md)を参照してください。
+`AUTH_MODE=oidc`かつ`SUPABASE_URL`設定時は、SupabaseのEmail/Passwordログインを表示します。ローカルSupabaseの起動と設定は[`deploy/supabase/README.md`](deploy/supabase/README.md)を参照してください。
 
 ```bash
 uv run streamlit run src/web_app.py
 ```
 
 ブラウザで `http://localhost:8501` にアクセスします。
-- Keycloakログイン状態とAPI・Ollama・PostgreSQLの稼働状態を確認できます。
+- Supabaseログイン状態とAPI・Ollama・PostgreSQLの稼働状態を確認できます。
 - 会話の新規作成、一覧選択、名前変更、アーカイブ・再開、削除に対応します。
 - 会話選択では会話名・更新日時・短縮IDを表示し、同名会話を区別できます。
 - 会話IDはURL指定を優先し、選択変更時もURLと同期します。最初の質問から会話名を自動設定します。
@@ -270,7 +276,7 @@ uv run streamlit run src/web_app.py
 
 ### 3. Web・モバイル向けAPIを起動する
 
-PostgreSQLとKeycloakを用意し、`.env`へデータベース、OIDC、CORS、レート制限設定を追加してから、アプリ所有テーブルを作成します。LangGraph所有テーブルはAPI初回起動時に安全に初期化されます。Dockge向けKeycloak設定は[`deploy/keycloak/README.md`](deploy/keycloak/README.md)を参照してください。
+Supabaseを用意し、`.env`へデータベース、OIDC、CORS、レート制限設定を追加してから、アプリ所有テーブルを作成します。LangGraph所有テーブルはAPI初回起動時に安全に初期化されます。Dockge向け構成は[`deploy/supabase/README.md`](deploy/supabase/README.md)を参照してください。
 
 ```bash
 uv run alembic upgrade head
@@ -311,7 +317,7 @@ curl -X POST \
   -d '{"content":"1+1を計算してください"}'
 ```
 
-`AUTH_MODE=oidc`では、最初の会話作成リクエストにも`Authorization: Bearer ...`が必要です。StreamlitはKeycloakから取得したアクセストークンをサーバー側API呼び出しだけに使用します。`AUTH_MODE=disabled`はローカル開発互換専用であり、外部公開には使用しないでください。
+`AUTH_MODE=oidc`では、最初の会話作成リクエストにも`Authorization: Bearer ...`が必要です。StreamlitはSupabaseから取得したアクセストークンをサーバー側API呼び出しだけに使用します。`AUTH_MODE=disabled`はローカル開発互換専用であり、外部公開には使用しないでください。
 
 画像解析APIのモデル準備、multipartリクエスト、JSON Schema、モバイル実装、エラー、保存・ログ方針は[`docs/vision-api.md`](docs/vision-api.md)を参照してください。
 
@@ -327,7 +333,7 @@ SSEでは `message.started`、`assistant.delta`、`tool.started`、
 > CORSは`CORS_ALLOWED_ORIGINS`に列挙したOriginだけを許可します。`*`は起動時に拒否されます。
 > レート制限はPostgreSQL利用時に全APIプロセスで共有され、`429`、`RateLimit`、`RateLimit-Policy`、`Retry-After`で再試行時期を通知します。移行期間の互換性のため`RateLimit-Limit`、`RateLimit-Remaining`、`RateLimit-Reset`も返します。
 > APIログにはリクエスト本文、Authorization、Cookie、ツール引数を記録せず、IPとユーザーIDはハッシュ化します。
-> 現在のKeycloak ComposeはLAN内検証用です。インターネットへ公開する前にHTTPSとリバースプロキシを構成してください。
+> self-hosted Supabase ComposeはLAN内開発用です。インターネットへ公開せず、本番ではSupabase Cloudを使用してください。
 
 ### SQLiteデータの移行
 
@@ -354,4 +360,4 @@ uv run python -m src.db.cleanup --limit 100
 uv run pytest
 ```
 
-現在は109件の自動テストを実行します。
+現在は113件の自動テストを実行します。

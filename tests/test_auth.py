@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 import jwt
 import pytest
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
 from src.api.app import create_app
 from src.api.auth import OpenIDConnectAuthenticator
@@ -56,6 +56,8 @@ def oidc_components() -> tuple[Settings, OpenIDConnectAuthenticator, Any]:
         auth_mode="oidc",
         oidc_issuer_url=ISSUER,
         oidc_audience=AUDIENCE,
+        oidc_jwks_url=None,
+        oidc_jwt_algorithm="RS256",
         database_url=None,
         checkpoint_database_url=None,
     )
@@ -187,3 +189,58 @@ async def test_oidc_rejects_expired_token(oidc_components):
 
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "invalid_access_token"
+
+
+@pytest.mark.asyncio
+async def test_oidc_accepts_configured_es256_token():
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public_numbers = private_key.public_key().public_numbers()
+    settings = Settings(
+        auth_mode="oidc",
+        oidc_issuer_url="http://supabase.test/auth/v1",
+        oidc_audience="authenticated",
+        oidc_jwks_url="http://supabase.test/auth/v1/.well-known/jwks.json",
+        oidc_jwt_algorithm="ES256",
+    )
+
+    def provider(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "keys": [
+                    {
+                        "kty": "EC",
+                        "kid": KID,
+                        "use": "sig",
+                        "alg": "ES256",
+                        "crv": "P-256",
+                        "x": _base64url_uint(public_numbers.x),
+                        "y": _base64url_uint(public_numbers.y),
+                    }
+                ]
+            },
+        )
+
+    now = int(time.time())
+    token = jwt.encode(
+        {
+            "iss": settings.oidc_issuer_url,
+            "aud": settings.oidc_audience,
+            "sub": "supabase-user",
+            "iat": now,
+            "exp": now + 300,
+            "email": "user@example.com",
+        },
+        private_key,
+        algorithm="ES256",
+        headers={"kid": KID},
+    )
+    authenticator = OpenIDConnectAuthenticator(
+        settings,
+        transport=httpx.MockTransport(provider),
+    )
+
+    principal = await authenticator.authenticate(token)
+
+    assert principal.subject == "supabase-user"
+    assert principal.display_name == "user@example.com"

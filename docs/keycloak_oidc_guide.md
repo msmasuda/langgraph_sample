@@ -1,5 +1,7 @@
 # Keycloak・OIDC構築ガイド
 
+> この構成はSupabase移行後のロールバック用です。通常の開発環境は[`../deploy/supabase/README.md`](../deploy/supabase/README.md)を使用してください。
+
 ## 1. 構成
 
 KeycloakはDockerサーバー`192.168.100.2`のDockgeで動かします。アプリ用PostgreSQLとは分離し、Keycloak専用PostgreSQLを同じStack内で使用します。
