@@ -6,7 +6,7 @@ services:
     container_name: langgraph-postgres
     restart: unless-stopped
     ports:
-      - "192.168.100.2:5432:5432"
+      - "192.168.100.2:15432:5432"
     environment:
       POSTGRES_DB: langgraph
       POSTGRES_USER: langgraph

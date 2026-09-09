@@ -16,9 +16,9 @@
 
 フェーズ2ではFastAPIアプリ、JSON API、SSEによるトークン・ツールイベント配信、OpenAPI、リクエストID、冪等性キー、同一会話の同時実行防止、切断・キャンセル処理、およびAPIテストを追加した。会話ID、実行ロック、冪等性キャッシュはフェーズ3までプロセス内管理とする。
 
-フェーズ3ではPostgreSQL用LangGraphチェックポインタ、SQLAlchemyモデル、Alembic、会話・メモ管理API、実行履歴・冪等性の永続化、複数プロセス間の実行リース、キャンセル要求、保存期限クリーンアップ、SQLite移行ツールを追加した。認証導入前の所有者は固定のローカルユーザーとし、フェーズ4でOIDC/JWTの利用者へ置き換える。
+フェーズ3ではPostgreSQL用LangGraphチェックポインタ、SQLAlchemyモデル、Alembic、会話・メモ管理API、実行履歴・冪等性の永続化、複数プロセス間の実行リース、キャンセル要求、保存期限クリーンアップ、SQLite移行ツールを追加した。ローカルでは固定ユーザーを使用し、公開時はフェーズ4のOIDC/JWT利用者へ切り替える。
 
-フェーズ4は利用上限を抑えつつ安全に検証できるよう、4-Aと4-Bへ分割した。4-AではKeycloak、OIDC Discovery/JWKS、RS256 JWT検証、`sub`と内部ユーザーの対応付け、会話・メモ・エージェントツールの所有者分離を実装する。4-BではCORS、ユーザー/IP単位のレート制限、構造化ログと機密情報マスキング、副作用ツールを無承認で登録させない承認ポリシー基盤を実装する。
+フェーズ4は利用上限を抑えつつ安全に検証できるよう、4-Aと4-Bへ分割した。4-Aでは汎用OIDC Discovery/JWKS、JWT検証、`sub`と内部ユーザーの対応付け、会話・メモ・エージェントツールの所有者分離を実装する。4-BではCORS、ユーザー/IP単位のレート制限、構造化ログと機密情報マスキング、副作用ツールを無承認で登録させない承認ポリシー基盤を実装する。
 
 ## 1. 目的
 
@@ -193,9 +193,9 @@ DELETE /v1/conversations/{conversation_id}/notes/{note_id}
 
 #### 実装内容
 
-- Dockge向けKeycloak + PostgreSQL Composeを追加する
-- WEB用`langgraph-web`とモバイル用`langgraph-mobile`を公開クライアントとして作成し、Authorization Code + PKCE（S256）を使用する
-- `langgraph-api`をResource Serverとして定義し、アクセストークンへAPI audienceを付与する
+- 認証サービス固有の構成を持たず、公開時に選定したOIDCプロバイダーを環境変数で設定する
+- WEB・モバイルクライアントはAuthorization Code + PKCE（S256）を使用する
+- `langgraph-api`をResource Serverとして扱い、アクセストークンへAPI audienceを付与する
 - OIDC DiscoveryからJWKS URLを取得し、署名鍵を期限付きキャッシュする
 - JWTのRS256署名、`iss`、`aud`、`exp`、`iat`、`sub`を検証する
 - JWTの`sub`を`users.external_subject`へ対応付け、安定した内部UUIDを割り当てる
@@ -208,7 +208,7 @@ DELETE /v1/conversations/{conversation_id}/notes/{note_id}
 - トークンなし、署名不正、発行者不一致、audience不一致、期限切れトークンを拒否する
 - 他ユーザーの会話IDを指定しても内容を取得できない
 - WEB・モバイル用アクセストークンの`aud`に`langgraph-api`が含まれる
-- Keycloak、PostgreSQL、Ollamaを用いた実環境テストが成功する
+- 選定したOIDCプロバイダー、PostgreSQL、Ollamaを用いた公開前テストが成功する
 
 ### フェーズ4-B：API保護の強化（実装済み）
 
@@ -257,8 +257,7 @@ DELETE /v1/conversations/{conversation_id}/notes/{note_id}
 
 - `src/web_api_client.py`にFastAPIのJSON・SSE契約を扱う同期クライアントを分離する
 - StreamlitはLangGraph、SQLite、PostgreSQL、Ollamaへ直接接続しない
-- KeycloakにStreamlit専用の機密クライアントを用意し、`st.login()`でAuthorization Codeフローを開始する
-- アクセストークンは`st.user.tokens`からサーバー側で取得し、画面・ログ・URLへ出さずBearer認証にだけ使用する
+- Streamlitは`AUTH_MODE=disabled`のローカル確認専用とし、認証処理を持たせない
 - 会話IDはURLの`conversation`クエリへ保存し、画面再読み込み時はAPIから会話と履歴を復元する
 - SSEの`assistant.delta`を逐次描画し、ツールイベントはツール名と開始・完了状態だけを表示する
 - フォーム内の`st.text_area`と明示送信ボタンを使用し、IME確定のEnterでは送信しない。Ctrl／Command+Enterでも送信できる
@@ -274,11 +273,10 @@ DELETE /v1/conversations/{conversation_id}/notes/{note_id}
 
 #### 動作確認結果
 
-- KeycloakのAuthorization Codeフローでログインできる
-- `langgraph-api` audienceを含むアクセストークンで会話一覧・作成・履歴取得が成功する
+- `AUTH_MODE=disabled`のローカル環境で会話一覧・作成・履歴取得が成功する
 - SSEでエージェント回答を逐次受信し、回答後にAPIから保存済み履歴を復元できる
 - API、Ollama、PostgreSQLの稼働状態をStreamlitで確認できる
-- 全71件の自動テストが成功する
+- 全自動テストが成功する
 
 ### フェーズ6：モバイル・Webクライアント向け仕様確定
 
@@ -426,7 +424,7 @@ src/
 
 以下はマイルストーン2の開始前までに決定する。
 
-1. 認証サービス：Auth0、Clerk、Cognito、Keycloakなど
+1. 公開時に利用するOIDC認証サービス
 2. APIおよびOllamaのデプロイ先
 3. 想定ユーザー数と同時利用者数
 4. 会話・メモの保存期間

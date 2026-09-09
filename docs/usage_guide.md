@@ -14,7 +14,7 @@
 ### セットアップ手順
 
 ```bash
-cd /Users/mauda/Projects/langgraph_sample
+cd /path/to/develop-3
 
 # 依存関係のインストール
 uv sync
@@ -42,8 +42,9 @@ WEB_API_BASE_URL=http://127.0.0.1:8000
 WEB_API_TIMEOUT_SECONDS=180
 IDEMPOTENCY_TTL_SECONDS=3600
 IDEMPOTENCY_MAX_ENTRIES=1000
-DATABASE_URL=postgresql+asyncpg://langgraph:パスワード@192.168.100.2:5432/langgraph
-CHECKPOINT_DATABASE_URL=postgresql://langgraph:パスワード@192.168.100.2:5432/langgraph
+AUTH_MODE=disabled
+DATABASE_URL=postgresql+asyncpg://langgraph:パスワード@192.168.100.2:15432/langgraph
+CHECKPOINT_DATABASE_URL=postgresql://langgraph:パスワード@192.168.100.2:15432/langgraph
 DATABASE_POOL_SIZE=5
 DATABASE_MAX_OVERFLOW=10
 EXECUTION_LEASE_SECONDS=300
@@ -82,7 +83,7 @@ uv run python -m src.cli
 
 ブラウザ上で利用できるAPIクライアント型チャットUIです。StreamlitはLangGraphやデータベースへ直接接続しないため、先にFastAPIを起動します。
 
-`AUTH_MODE=oidc`かつ`SUPABASE_URL`設定時はSupabaseのEmail/Passwordログインを表示します。設定は[`../deploy/supabase/README.md`](../deploy/supabase/README.md)を参照してください。`.streamlit/secrets.toml`はKeycloakへロールバックする場合だけ使用します。
+Streamlitはローカル確認専用です。FastAPIと同じ`.env`で`AUTH_MODE=disabled`を使用します。
 
 ```bash
 uv run streamlit run src/web_app.py
@@ -103,9 +104,8 @@ uv run streamlit run src/web_app.py
    - 最初の質問から会話名を自動設定します。会話が0件の場合は、明示的に「新しい会話」を押したときだけ作成します。
    - ブラウザ再読み込み後も、選択中の会話IDを使ってAPIから履歴を復元します。
    - APIへ保存された会話単位のメモを参照できます。
-3. **接続・認証状態**:
+3. **接続状態**:
    - API、Ollama、PostgreSQLの状態を表示します。
-   - `AUTH_MODE=oidc`ではSupabaseのログイン・自動更新・ログアウトを提供し、アクセストークンをAPI呼び出しだけに使用します。
    - モデルとTemperatureはAPIサーバー側の`.env`で管理します。
 
 ---
@@ -145,4 +145,4 @@ uv run python -m src.db.cleanup --limit 100
 uv run pytest
 ```
 
-全71件のテストケース（ツール単体動作、安全性、同期・非同期グラフ、共通サービス、API、OIDC、SSE、会話・メモCRUD、冪等性、レート制限、Streamlit用APIクライアント、会話選択、IME安全な明示送信、ストリーミング停止、Web UIスモークテスト）が実行されます。
+ツール単体動作、安全性、同期・非同期グラフ、共通サービス、API、OIDC、SSE、会話・メモCRUD、冪等性、レート制限、Streamlit用APIクライアント、会話選択、IME安全な明示送信、ストリーミング停止、Web UIスモークテストが実行されます。

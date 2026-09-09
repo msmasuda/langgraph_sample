@@ -10,10 +10,9 @@
 
 ```mermaid
 flowchart TD
-    WebMobile["Web / モバイル"] --> Auth["Supabase Auth\nOIDC / JWT"]
-    Auth --> API["FastAPI\nJWT検証・所有者確認"]
-    Streamlit["Streamlit Web UI"] --> StreamlitAuth["Supabase Auth\nEmail / Password"]
-    StreamlitAuth --> WebClient["web_api_client\nBearer + SSE"]
+    WebMobile["公開Web / モバイル"] -.-> Auth["外部OIDCプロバイダー"]
+    Auth -.-> API["FastAPI\nJWT検証・所有者確認"]
+    Streamlit["ローカル確認用Streamlit"] --> WebClient["web_api_client\nSSE"]
     WebClient --> API
     CLI["CLI"] --> Service["AgentService\n非同期実行・上限・エラー変換"]
     API --> Service
@@ -81,8 +80,8 @@ class AgentState(TypedDict):
 - 同じ会話への重複実行は`409 conversation_busy`で拒否します。
 - SSEは`message.started`、`assistant.delta`、`tool.started`、`tool.completed`、`message.completed`、`message.failed`を配信し、イベント待ちの間は`: stream-heartbeat`コメントを送信します。
 - `src/api/auth.py`がOIDC DiscoveryまたはJWKSを取得し、設定したRS256／ES256署名、`iss`、`aud`、`exp`、`iat`、`sub`を検証します。
-- `/health`と`/ready`以外の`/v1/*`はBearerアクセストークン必須です。
-- JWTの`sub`を内部ユーザーUUIDへ対応付け、会話・メモ取得時は常に`user_id`を検索条件へ含めます。
+- `AUTH_MODE=oidc`では`/health`と`/ready`以外の`/v1/*`でBearerアクセストークンを必須にします。ローカル確認では`AUTH_MODE=disabled`を使用します。
+- OIDC有効時はJWTの`sub`を内部ユーザーUUIDへ対応付けます。無効時は固定ローカルユーザーを使用し、どちらも会話・メモ取得時は常に`user_id`を検索条件へ含めます。
 - LangGraphのRunnableConfigにも内部`user_id`を渡し、エージェントが呼ぶメモツールまで同じ所有者境界を維持します。
 
 ### 2.6 PostgreSQL永続化層 (`src/db/`)
@@ -107,7 +106,7 @@ class AgentState(TypedDict):
 - `src/web_api_client.py`がJSON応答、エラー応答、SSEイベントを型付きデータへ変換します。
 - `src/web_conversation_ui.py`が会話IDの選択優先順位、識別ラベル、初回タイトル生成を副作用のない関数として扱います。
 - `src/web_app.py`は会話管理と描画に限定し、LangGraph、Ollama、SQLite、PostgreSQLを直接import・接続しません。
-- Supabase設定時はEmail/Passwordでログインし、利用者別のトークンを`st.session_state`へ保持して期限前に更新します。アクセストークンはサーバー側API呼び出しにだけ使用します。
+- Streamlitは`AUTH_MODE=disabled`のローカル確認専用で、認証処理を持ちません。公開時は別のWeb／モバイルクライアントからAPIを利用します。
 - URLには会話IDだけを保持し、URL指定を一時セッション状態より優先します。選択変更時はURLを同期し、履歴は毎回APIから取得します。API側の所有者確認が認可境界です。
 - 同名会話は更新日時と短縮IDで区別し、空会話は明示操作時だけ作成します。
 - チャット入力はフォーム内の複数行入力と明示送信ボタンで構成し、IME確定のEnterを送信として扱いません。Ctrl／Command+Enterでも送信できます。

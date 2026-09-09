@@ -78,9 +78,6 @@ class Settings(BaseSettings):
     oidc_jwks_cache_seconds: float = Field(default=300.0, gt=0.0, le=86_400.0)
     oidc_http_timeout_seconds: float = Field(default=5.0, gt=0.0, le=30.0)
     oidc_clock_skew_seconds: int = Field(default=30, ge=0, le=300)
-    supabase_url: str | None = None
-    supabase_publishable_key: str | None = None
-
     # API protection settings
     cors_allowed_origins: str = ""
     cors_allow_credentials: bool = True

@@ -15,7 +15,7 @@ from src.api.auth import OpenIDConnectAuthenticator
 from src.config import Settings
 from tests.test_api import StubAgentService, StubModelService
 
-ISSUER = "http://keycloak.test/realms/langgraph"
+ISSUER = "http://idp.test/realms/langgraph"
 AUDIENCE = "langgraph-api"
 KID = "test-signing-key"
 
@@ -197,9 +197,9 @@ async def test_oidc_accepts_configured_es256_token():
     public_numbers = private_key.public_key().public_numbers()
     settings = Settings(
         auth_mode="oidc",
-        oidc_issuer_url="http://supabase.test/auth/v1",
-        oidc_audience="authenticated",
-        oidc_jwks_url="http://supabase.test/auth/v1/.well-known/jwks.json",
+        oidc_issuer_url="http://idp.test",
+        oidc_audience="langgraph-api",
+        oidc_jwks_url="http://idp.test/.well-known/jwks.json",
         oidc_jwt_algorithm="ES256",
     )
 
@@ -226,7 +226,7 @@ async def test_oidc_accepts_configured_es256_token():
         {
             "iss": settings.oidc_issuer_url,
             "aud": settings.oidc_audience,
-            "sub": "supabase-user",
+            "sub": "oidc-user",
             "iat": now,
             "exp": now + 300,
             "email": "user@example.com",
@@ -242,5 +242,5 @@ async def test_oidc_accepts_configured_es256_token():
 
     principal = await authenticator.authenticate(token)
 
-    assert principal.subject == "supabase-user"
+    assert principal.subject == "oidc-user"
     assert principal.display_name == "user@example.com"

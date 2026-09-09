@@ -2,14 +2,12 @@
 
 ## 1. 起動
 
-OllamaとSupabaseを起動し、プロジェクト直下の`.env`へ次を設定します。
+Ollamaと`deploy/postgres/compose.yaml`のPostgreSQLを起動し、プロジェクト直下の`.env`へ次を設定します。
 
 ```ini
-AUTH_MODE=oidc
-OIDC_ISSUER_URL=http://192.168.100.2:8000/auth/v1
-OIDC_AUDIENCE=authenticated
-OIDC_JWKS_URL=http://192.168.100.2:8000/auth/v1/.well-known/jwks.json
-OIDC_JWT_ALGORITHM=ES256
+AUTH_MODE=disabled
+DATABASE_URL=postgresql+asyncpg://langgraph:パスワード@192.168.100.2:15432/langgraph
+CHECKPOINT_DATABASE_URL=postgresql://langgraph:パスワード@192.168.100.2:15432/langgraph
 ```
 
 その後、APIサーバーを起動します。
@@ -23,7 +21,7 @@ uv run uvicorn src.api.app:app --host 127.0.0.1 --port 8000
 
 ## 2. エンドポイント
 
-`/health`と`/ready`は監視用に認証不要です。その他の`/v1/*`は`Authorization: Bearer <access_token>`が必要です。
+ローカルの`AUTH_MODE=disabled`では認証不要です。公開時に`AUTH_MODE=oidc`へ切り替えると、`/health`と`/ready`以外の`/v1/*`で`Authorization: Bearer <access_token>`が必要になります。
 
 | メソッド | パス | 用途 |
 |---|---|---|
@@ -45,8 +43,7 @@ uv run uvicorn src.api.app:app --host 127.0.0.1 --port 8000
 ### 会話を作成する
 
 ```bash
-curl -X POST http://127.0.0.1:8000/v1/conversations \
-  -H 'Authorization: Bearer アクセストークン'
+curl -X POST http://127.0.0.1:8000/v1/conversations
 ```
 
 応答例：
@@ -63,7 +60,6 @@ curl -X POST http://127.0.0.1:8000/v1/conversations \
 ```bash
 curl -X POST \
   http://127.0.0.1:8000/v1/conversations/会話ID/messages \
-  -H 'Authorization: Bearer アクセストークン' \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: クライアントで生成した一意なキー' \
   -d '{"content":"東京の現在時刻を教えてください"}'
@@ -74,7 +70,6 @@ curl -X POST \
 ```bash
 curl -N -X POST \
   http://127.0.0.1:8000/v1/conversations/会話ID/messages/stream \
-  -H 'Authorization: Bearer アクセストークン' \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: クライアントで生成した一意なキー' \
   -d '{"content":"1+1を計算してください"}'
@@ -95,9 +90,10 @@ SSEのイベント種別：
 
 ## 4. 認証
 
-- WEB・モバイルはSupabase Authの公開可能なpublishable keyを使用し、secret keyをアプリへ保存しません。
+- ローカル確認では`AUTH_MODE=disabled`を使用し、認証基盤を起動しません。
+- 公開時は選定したOIDCプロバイダーのissuer、audience、JWKS URL、署名方式を設定します。
 - APIへ送るのはIDトークンではなくアクセストークンです。
-- APIは設定したRS256またはES256署名、発行者、`authenticated` audience、有効期限、`sub`を検証します。
+- APIは設定したRS256またはES256署名、発行者、audience、有効期限、`sub`を検証します。
 - `sub`は内部ユーザーUUIDへ対応付けられます。同じ利用者は再ログイン後も同じ会話へアクセスできます。
 - 他ユーザーの会話IDへアクセスした場合、存在の推測を防ぐため`404 conversation_not_found`を返します。
 - アクセストークンの更新は各WEB・モバイルOIDCライブラリへ任せ、401受信時は一度だけ更新・再送してください。
@@ -171,6 +167,4 @@ WEB_API_BASE_URL=http://127.0.0.1:8000
 WEB_API_TIMEOUT_SECONDS=180
 ```
 
-OIDC有効時は`SUPABASE_URL`と`SUPABASE_PUBLISHABLE_KEY`を設定します。Streamlitは利用者ごとのaccess tokenとrefresh tokenを`st.session_state`だけに保持し、アクセストークンをサーバー側API呼び出しにだけ使用します。タブ終了・サーバー再起動後は再ログインが必要です。
-
-会話IDは`conversation`クエリパラメータへ保存しますが、APIは必ずJWT所有者を確認するため、他ユーザーがURLを知っていても会話を取得できません。回答はSSEで逐次表示し、ツール引数とツール出力はWeb UIへ表示しません。
+Streamlitは`AUTH_MODE=disabled`のローカル確認専用です。会話IDは`conversation`クエリパラメータへ保存し、回答はSSEで逐次表示します。ツール引数とツール出力はWeb UIへ表示しません。

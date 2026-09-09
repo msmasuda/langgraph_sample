@@ -105,8 +105,8 @@ agent = create_agent(checkpointer=checkpointer)
 APIでは`CHECKPOINT_DATABASE_URL`を設定すると`AsyncPostgresSaver`を利用します。アプリ用の接続はSQLAlchemy asyncpg形式、LangGraph用はpsycopg形式で指定します。
 
 ```ini
-DATABASE_URL=postgresql+asyncpg://langgraph:パスワード@192.168.100.2:5432/langgraph
-CHECKPOINT_DATABASE_URL=postgresql://langgraph:パスワード@192.168.100.2:5432/langgraph
+DATABASE_URL=postgresql+asyncpg://langgraph:パスワード@192.168.100.2:15432/langgraph
+CHECKPOINT_DATABASE_URL=postgresql://langgraph:パスワード@192.168.100.2:15432/langgraph
 ```
 
 スキーマ変更時はAlembicの新しいリビジョンを作成し、`uv run alembic upgrade head`で適用します。LangGraph所有テーブルをアプリのAlembicから変更しないでください。
