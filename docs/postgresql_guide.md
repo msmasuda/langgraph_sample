@@ -2,22 +2,22 @@
 
 ## 1. 構成
 
-- API・Ollama: `/Users/mauda/Projects/langgraph_sample`を実行するMac
+- API・Ollama: このリポジトリを実行するMac
 - PostgreSQL: `192.168.100.2`上のDocker / Dockge
-- PostgreSQLポート: TCP `5432`
+- PostgreSQL公開ポート: TCP `15432`（コンテナ内は`5432`）
 - データベース名・ユーザー名: `langgraph`
 
 リポジトリの`deploy/postgres/compose.yaml`をDockgeへ登録し、同じディレクトリの`.env`へ`POSTGRES_PASSWORD`を設定します。データは名前付きボリューム`langgraph_postgres_data`へ保存されます。
 
-PostgreSQLはインターネットへ公開せず、ファイアウォールではAPIを動かすMacからTCP 5432への接続だけを許可してください。
+PostgreSQLはインターネットへ公開せず、ファイアウォールではAPIを動かすMacからTCP 15432への接続だけを許可してください。
 
 ## 2. API側の接続設定
 
 プロジェクトの`.env`へ次を設定します。`.env`はGit管理対象外です。
 
 ```ini
-DATABASE_URL=postgresql+asyncpg://langgraph:パスワード@192.168.100.2:5432/langgraph
-CHECKPOINT_DATABASE_URL=postgresql://langgraph:パスワード@192.168.100.2:5432/langgraph
+DATABASE_URL=postgresql+asyncpg://langgraph:パスワード@192.168.100.2:15432/langgraph
+CHECKPOINT_DATABASE_URL=postgresql://langgraph:パスワード@192.168.100.2:15432/langgraph
 DATABASE_POOL_SIZE=5
 DATABASE_MAX_OVERFLOW=10
 DATABASE_CONNECT_TIMEOUT_SECONDS=10

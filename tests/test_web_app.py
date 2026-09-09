@@ -10,35 +10,17 @@ from streamlit.testing.v1 import AppTest
 from src.config import get_settings
 
 
-def test_streamlit_app_shows_supabase_login(monkeypatch):
+def test_streamlit_app_rejects_oidc_mode(monkeypatch):
     monkeypatch.setenv("AUTH_MODE", "oidc")
-    monkeypatch.setenv("SUPABASE_URL", "http://supabase.test")
-    monkeypatch.setenv("SUPABASE_PUBLISHABLE_KEY", "publishable")
     monkeypatch.setenv("WEB_API_BASE_URL", "http://api.test")
     get_settings.cache_clear()
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/ready":
-            return httpx.Response(
-                200,
-                json={"status": "ready", "ollama": True, "database": True},
-            )
-        return httpx.Response(404)
-
-    real_client = httpx.Client
-
-    def mock_client(*args, **kwargs):
-        kwargs["transport"] = httpx.MockTransport(handler)
-        return real_client(*args, **kwargs)
-
-    with patch("src.web_api_client.httpx.Client", side_effect=mock_client):
-        app = AppTest.from_file(
-            str(Path(__file__).parents[1] / "src" / "web_app.py")
-        ).run(timeout=10)
+    app = AppTest.from_file(
+        str(Path(__file__).parents[1] / "src" / "web_app.py")
+    ).run(timeout=10)
 
     assert not app.exception
-    assert [item.label for item in app.text_input] == ["メールアドレス", "パスワード"]
-    assert any(button.label == "ログイン" for button in app.button)
+    assert any("AUTH_MODE=disabled" in item.value for item in app.error)
     get_settings.cache_clear()
 
 

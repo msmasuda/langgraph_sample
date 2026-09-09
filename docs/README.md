@@ -35,34 +35,24 @@
    - Docker Compose構成と接続設定
    - AlembicとLangGraphテーブル初期化
    - SQLite移行、保存期限、バックアップ上の注意
-7. **[Keycloak・OIDC構築ガイド](keycloak_oidc_guide.md)**
-   - ロールバック用Keycloak構成
-   - WEB・モバイルのPKCEクライアント
-   - APIのJWT検証設定と確認方法
-8. **[Supabase移行計画書](supabase_migration_plan.md)**
-   - 本番Supabase Cloud・ローカルDocker開発への移行仕様と進捗
-   - DB・認証（RS256/ES256・JWKS）・Streamlit連携設計
-   - Data API非公開化、Direct／Session Pooler接続、セッション更新方針
-   - Codex向け実装指示書・タスクリスト
-
 ### 実装状況
 
 - フェーズ1「エージェント共通コアの分離」：`feature/phase1-agent-core`ブランチで実装済み
 - フェーズ2「FastAPIの最小API」：`develop`へマージ済み
 - フェーズ3「PostgreSQLと会話管理」：`develop`へマージ済み
-- フェーズ4-A「OIDC/JWT認証と所有者分離」：`develop`へマージ済み
+- フェーズ4-A「汎用OIDC/JWT認証と所有者分離」：`develop`へマージ済み
 - フェーズ4-B「API保護の強化」：`develop`へマージ済み
 - フェーズ5「StreamlitのAPIクライアント化」：`develop`へマージ済み
 - Streamlit会話選択改善：`codex/fix-streamlit-conversation-selection`ブランチで実装・動作確認済み
-- Streamlit IME誤送信・生成停止改善：`codex/fix-streamlit-ime-cancel`ブランチで実装・自動テスト済み（ログイン後の実画面確認待ち）
-- Supabase移行：アプリ・Dockge構成・自動テストを実装済み、ローカル実環境確認待ち
+- Streamlit IME誤送信・生成停止改善：`codex/fix-streamlit-ime-cancel`ブランチで実装・自動テスト済み
+- ローカル実行環境：Ollama、FastAPI、PostgreSQL、確認用Streamlitの最小構成
 - フェーズ6以降：未着手
 
 ---
 
 ## 🚀 プロジェクト概要
 
-- **プロジェクトパス**: `/Users/mauda/Projects/langgraph_sample`
+- **プロジェクトパス**: リポジトリのルートディレクトリ
 - **主要スタック**:
   - Python 3.12 (`uv` パッケージ管理)
   - `langgraph` (0.2.x+ / 1.x+)
@@ -71,6 +61,6 @@
   - `streamlit` (Web UI)
   - `fastapi` / `uvicorn` (Web・モバイル向けAPI)
   - `postgresql` / `sqlalchemy` / `alembic` (永続化・マイグレーション)
-  - `keycloak` / `pyjwt` (OIDC認証・JWT検証)
+  - `pyjwt` (公開時のOIDC/JWT検証)
   - FastAPI CORS / PostgreSQL共有レート制限 / JSON構造化ログ
   - `ddgs` (Web検索ツール)

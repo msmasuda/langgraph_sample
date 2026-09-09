@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import time
 import uuid
 from typing import Any
 
 import streamlit as st
 
 from src.config import get_settings
-from src.supabase_auth import SupabaseAuthClient, SupabaseAuthError, SupabaseSession
 from src.web_api_client import AgentApiClient, AgentApiError
 from src.web_conversation_ui import (
     DEFAULT_CONVERSATION_TITLE,
@@ -25,6 +23,10 @@ st.set_page_config(
 )
 
 settings = get_settings()
+
+if settings.auth_mode != "disabled":
+    st.error("Streamlitはローカル確認専用です。AUTH_MODE=disabledにしてください。")
+    st.stop()
 
 
 @st.cache_data(ttl=5, max_entries=10, show_spinner=False)
@@ -43,28 +45,6 @@ def get_api_readiness(base_url: str, timeout_seconds: float) -> dict[str, Any]:
             "result": None,
             "error": "APIの状態を取得できませんでした。",
         }
-
-
-def streamlit_auth_error() -> str | None:
-    """Validate only the presence of required Streamlit OIDC settings."""
-    try:
-        auth = st.secrets.get("auth", {})
-    except Exception:
-        return ".streamlit/secrets.tomlが設定されていません。"
-    required = {
-        "redirect_uri",
-        "cookie_secret",
-        "client_id",
-        "client_secret",
-        "server_metadata_url",
-    }
-    if not required.issubset(auth):
-        return ".streamlit/secrets.tomlのOIDC設定が不足しています。"
-    exposed = auth.get("expose_tokens")
-    exposed_tokens = {exposed} if isinstance(exposed, str) else set(exposed or [])
-    if "access" not in exposed_tokens:
-        return "Streamlit認証設定でアクセストークンを有効にしてください。"
-    return None
 
 
 def show_api_error(error: AgentApiError) -> None:
@@ -117,109 +97,12 @@ with st.sidebar:
             st.info("PostgreSQL: 未使用", icon=":material/info:")
     st.caption(f"API接続先: `{settings.web_api_base_url}`")
 
-access_token: str | None = None
-if settings.auth_mode == "oidc" and settings.supabase_url:
-    if not settings.supabase_publishable_key:
-        st.error("SUPABASE_PUBLISHABLE_KEYが設定されていません。")
-        st.stop()
-    auth_client = SupabaseAuthClient(
-        settings.supabase_url,
-        settings.supabase_publishable_key,
-        settings.oidc_http_timeout_seconds,
-    )
-    session = st.session_state.get("supabase_session")
-    if session is not None and not isinstance(session, SupabaseSession):
-        st.session_state.pop("supabase_session", None)
-        session = None
-    if session and session.expires_at <= time.time() + 60:
-        try:
-            session = auth_client.refresh(session.refresh_token)
-            st.session_state.supabase_session = session
-        except SupabaseAuthError as error:
-            st.session_state.pop("supabase_session", None)
-            st.warning(str(error))
-            session = None
-    if session is None:
-        st.info("Supabaseアカウントでログインすると会話を利用できます。")
-        with st.form("supabase_login", clear_on_submit=False):
-            email = st.text_input("メールアドレス")
-            password = st.text_input("パスワード", type="password")
-            submitted = st.form_submit_button(
-                "ログイン",
-                type="primary",
-                icon=":material/login:",
-            )
-        st.caption("タブを閉じた場合やサーバー再起動後は再ログインが必要です。")
-        if submitted:
-            if not email.strip() or not password:
-                st.warning("メールアドレスとパスワードを入力してください。")
-            else:
-                try:
-                    st.session_state.supabase_session = auth_client.sign_in(
-                        email,
-                        password,
-                    )
-                    st.rerun()
-                except SupabaseAuthError as error:
-                    st.error(str(error))
-        st.stop()
-    access_token = session.access_token
-    with st.sidebar:
-        st.divider()
-        st.subheader("認証")
-        st.success("Supabaseで認証済み", icon=":material/verified_user:")
-        if session.email:
-            st.caption(session.email)
-        if st.button("ログアウト", icon=":material/logout:", width="stretch"):
-            try:
-                auth_client.logout(session.access_token)
-            except SupabaseAuthError:
-                pass
-            st.session_state.pop("supabase_session", None)
-            st.rerun()
-elif settings.auth_mode == "oidc":
-    configuration_error = streamlit_auth_error()
-    if configuration_error:
-        st.error(configuration_error)
-        st.info(
-            "`.streamlit/secrets.toml.example`をコピーし、"
-            "Keycloakの`langgraph-streamlit`クライアント情報を設定してください。"
-        )
-        st.stop()
-    if not getattr(st.user, "is_logged_in", False):
-        st.info("Keycloakでログインすると会話を利用できます。")
-        if st.button("ログイン", type="primary", icon=":material/login:"):
-            st.login()
-        st.stop()
-    expires_at = st.user.get("exp")
-    if isinstance(expires_at, (int, float)) and expires_at <= time.time():
-        st.warning("ログインの有効期限が切れました。再ログインしてください。")
-        if st.button("再ログイン", icon=":material/login:"):
-            st.logout()
-        st.stop()
-    access_token = st.user.tokens.get("access")
-    if not access_token:
-        st.error("アクセストークンを取得できません。認証設定を確認してください。")
-        st.stop()
-    with st.sidebar:
-        st.divider()
-        st.subheader("認証")
-        display_name = st.user.get("name") or st.user.get("preferred_username")
-        st.success("Keycloakで認証済み", icon=":material/verified_user:")
-        if display_name:
-            st.caption(str(display_name))
-        if st.button("ログアウト", icon=":material/logout:", width="stretch"):
-            st.logout()
-else:
-    with st.sidebar:
-        st.divider()
-        st.subheader("認証")
-        st.warning("ローカル互換モード", icon=":material/warning:")
-        st.caption("外部公開時はAUTH_MODE=oidcを使用してください。")
+with st.sidebar:
+    st.divider()
+    st.caption("ローカル確認専用（認証なし）")
 
 client = AgentApiClient(
     settings.web_api_base_url,
-    access_token=access_token,
     timeout_seconds=settings.web_api_timeout_seconds,
 )
 
@@ -235,8 +118,6 @@ try:
     conversation_page = client.list_conversations()
 except AgentApiError as error:
     show_api_error(error)
-    if error.status_code == 401:
-        st.info("ログアウト後、もう一度ログインしてください。")
     st.stop()
 
 conversations = list(conversation_page.items)
